@@ -6,6 +6,8 @@ mod color;
 mod config;
 mod crosshair;
 mod hotkey;
+mod image;
+mod menu;
 mod png;
 
 #[cfg(windows)]
@@ -21,6 +23,7 @@ USAGE:
 
 OPTIONS:
     -c, --config <FILE>      Use this config file instead of the default location
+    -m, --menu               Open the crosshair editor instead of the overlay
         --preview <FILE>     Render the startup crosshair to a PNG and exit
         --zoom <N>           Scale factor for --preview (default 8)
         --profile <N>        Override the startup profile index
@@ -32,6 +35,7 @@ OPTIONS:
 struct Args {
     config: Option<PathBuf>,
     preview: Option<PathBuf>,
+    menu: bool,
     zoom: u32,
     profile: Option<usize>,
 }
@@ -45,6 +49,7 @@ fn parse_args() -> Result<Command, String> {
     let mut args = Args {
         config: None,
         preview: None,
+        menu: false,
         zoom: 8,
         profile: None,
     };
@@ -57,6 +62,7 @@ fn parse_args() -> Result<Command, String> {
         };
         match arg.as_str() {
             "-c" | "--config" => args.config = Some(value(&arg)?.into()),
+            "-m" | "--menu" => args.menu = true,
             "--preview" => args.preview = Some(value(&arg)?.into()),
             "--zoom" => {
                 args.zoom = value(&arg)?
@@ -93,13 +99,17 @@ fn run() -> Result<(), String> {
     };
 
     let path = args.config.unwrap_or_else(config::default_path);
+    if args.menu {
+        return menu::run(path);
+    }
     let mut cfg = config::Config::load_or_create(&path)?;
     if let Some(p) = args.profile {
         cfg.profile = p;
     }
 
     if let Some(out) = args.preview {
-        let png = png::encode(&cfg.active().render(), args.zoom);
+        let canvas = cfg.active().render(&config::base_dir(&path))?;
+        let png = png::encode(&canvas, args.zoom);
         std::fs::write(&out, png).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
         println!("wrote {} ({})", out.display(), cfg.active().name);
         return Ok(());
@@ -113,7 +123,7 @@ fn run() -> Result<(), String> {
     {
         let _ = cfg;
         Err("the live overlay currently runs on Windows only; \
-             use --preview <FILE> to render a crosshair on this platform"
+             use --menu to edit crosshairs or --preview <FILE> to render one"
             .into())
     }
 }

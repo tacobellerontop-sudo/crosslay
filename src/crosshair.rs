@@ -3,10 +3,14 @@
 //! Rendering happens only when the crosshair changes (startup, profile switch,
 //! config reload). The result is handed to the compositor once and never
 //! redrawn, so the overlay costs nothing per frame.
+//!
+//! A crosshair is either drawn from shapes (arms, dot, circle, outline) or,
+//! when `image` is set, taken from a PNG file.
 
 use crate::canvas::Canvas;
 use crate::color::Color;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -34,6 +38,13 @@ pub struct Crosshair {
     /// Outline width in pixels drawn around every part (0 = no outline).
     pub outline: u32,
     pub outline_color: Color,
+    /// PNG file to use instead of the shapes above ("" = draw shapes).
+    /// Relative paths are resolved against the config file's folder.
+    pub image: String,
+    /// Scale factor for `image` (nearest-neighbour, keeps pixel art crisp).
+    pub image_scale: f32,
+    /// Opacity of the whole crosshair, 0.0 to 1.0.
+    pub opacity: f32,
     /// Shift the crosshair away from the screen centre, in pixels.
     pub offset_x: i32,
     pub offset_y: i32,
@@ -54,6 +65,9 @@ impl Default for Crosshair {
             circle_thickness: 1,
             outline: 1,
             outline_color: Color::rgb(0, 0, 0),
+            image: String::new(),
+            image_scale: 1.0,
+            opacity: 1.0,
             offset_x: 0,
             offset_y: 0,
         }
@@ -65,7 +79,46 @@ impl Default for Crosshair {
 const MAX_DIM: u32 = 1024;
 
 impl Crosshair {
-    pub fn render(&self) -> Canvas {
+    /// Whether this crosshair is drawn from a PNG instead of shapes.
+    pub fn uses_image(&self) -> bool {
+        !self.image.trim().is_empty()
+    }
+
+    /// Absolute path of `image`, resolving relative paths against `base_dir`.
+    pub fn image_path(&self, base_dir: &Path) -> PathBuf {
+        let p = Path::new(self.image.trim());
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base_dir.join(p)
+        }
+    }
+
+    /// Render the crosshair. `base_dir` is the folder relative image paths are
+    /// resolved against (the config file's folder).
+    pub fn render(&self, base_dir: &Path) -> Result<Canvas, String> {
+        let mut canvas = if self.uses_image() {
+            let img = crate::image::load_png(&self.image_path(base_dir))?;
+            crate::image::scale(&img, self.image_scale)
+        } else {
+            self.render_shapes()
+        };
+        canvas.apply_opacity(self.opacity);
+        Ok(canvas)
+    }
+
+    /// Like [`Self::render`], but falls back to the shapes if the image can't
+    /// be loaded, so the overlay always shows something.
+    pub fn render_or_shapes(&self, base_dir: &Path) -> Canvas {
+        self.render(base_dir).unwrap_or_else(|_| {
+            let mut c = self.render_shapes();
+            c.apply_opacity(self.opacity);
+            c
+        })
+    }
+
+    /// Render the shape-based crosshair, ignoring `image` and `opacity`.
+    pub fn render_shapes(&self) -> Canvas {
         let t = self.thickness.clamp(1, MAX_DIM) as i32;
         let len = self.length.min(MAX_DIM) as i32;
         let gap = self.gap.min(MAX_DIM) as i32;
@@ -201,7 +254,7 @@ mod tests {
             outline: 0,
             ..Default::default()
         };
-        let c = ch.render();
+        let c = ch.render_shapes();
         let (ax, ay) = c.anchor;
         // Gap around the anchor is empty, arms start right after it.
         assert_eq!(alpha(&c, ax, ay), 0);
@@ -228,7 +281,7 @@ mod tests {
             outline: 0,
             ..Default::default()
         }
-        .render();
+        .render_shapes();
         let (ax, ay) = c.anchor;
         assert_eq!(alpha(&c, ax, ay - 6), 0);
         assert_eq!(alpha(&c, ax, ay + 6), 255);
@@ -243,7 +296,7 @@ mod tests {
             outline: 1,
             ..Default::default()
         }
-        .render();
+        .render_shapes();
         let (ax, ay) = c.anchor;
         let px = |x, y| c.pixels[(y as u32 * c.width + x as u32) as usize];
         assert_eq!(px(ax, ay), 0xFF00FF00);
@@ -258,7 +311,7 @@ mod tests {
             gap: u32::MAX,
             ..Default::default()
         }
-        .render();
+        .render_shapes();
         assert!(c.width < 4 * MAX_DIM + 200);
     }
 }

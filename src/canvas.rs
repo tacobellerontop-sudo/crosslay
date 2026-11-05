@@ -42,3 +42,19 @@ impl Canvas {
         out
     }
 }
+
+impl Canvas {
+    /// Multiply every pixel (all premultiplied channels) by `opacity`.
+    pub fn apply_opacity(&mut self, opacity: f32) {
+        let o = opacity.clamp(0.0, 1.0);
+        if o >= 1.0 {
+            return;
+        }
+        let k = (o * 256.0) as u32;
+        for px in &mut self.pixels {
+            let c = *px;
+            let ch = |shift: u32| ((((c >> shift) & 0xFF) * k) >> 8) << shift;
+            *px = ch(24) | ch(16) | ch(8) | ch(0);
+        }
+    }
+}

@@ -16,6 +16,7 @@ use std::ptr::{null, null_mut};
 use std::time::SystemTime;
 
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
@@ -25,6 +26,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE,
+};
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -32,8 +36,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_TOPMOST, MB_ICONERROR,
-    MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostMessageW, RegisterClassExW, SW_HIDE,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, HWND_TOPMOST,
+    MB_ICONERROR, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostMessageW, RegisterClassExW, SW_HIDE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetTimer, SetWindowPos, ShowWindow,
     ULW_ALPHA, UpdateLayeredWindow, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_TIMER, WNDCLASSEXW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -41,6 +45,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// Posted to ourselves when the display layout changes.
 const WM_APP_REPOSITION: u32 = WM_APP + 1;
+/// Posted by the editor after it saved the config.
+const WM_APP_RELOAD: u32 = WM_APP + 2;
+const CLASS_NAME: &str = "crosslay_overlay";
 /// Housekeeping timer: re-assert top-most and check the config for edits.
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 1500;
@@ -87,13 +94,60 @@ struct App {
     file_profile: usize,
 }
 
+/// Name of the mutex a running overlay holds (one overlay per user session).
+const OVERLAY_MUTEX: &str = "Local\\crosslay-overlay";
+
+/// Whether an overlay is currently running.
+pub fn overlay_running() -> bool {
+    let name = wide(OVERLAY_MUTEX);
+    let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if h.is_null() {
+        return false;
+    }
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+    true
+}
+
+/// Tell a running overlay to reload its config right away (instead of on its
+/// next file check).
+pub fn notify_overlay() {
+    let class = wide(CLASS_NAME);
+    unsafe {
+        let hwnd = FindWindowW(class.as_ptr(), null());
+        if !hwnd.is_null() {
+            PostMessageW(hwnd, WM_APP_RELOAD, 0, 0);
+        }
+    }
+}
+
+/// Start the editor as a separate process. Its memory is gone as soon as the
+/// window closes, so the overlay itself stays tiny.
+fn spawn_menu(path: &std::path::Path) {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe)
+            .arg("--menu")
+            .arg("--config")
+            .arg(path)
+            .spawn();
+    }
+}
+
 pub fn run(path: PathBuf, cfg: Config) -> Result<(), String> {
     unsafe {
+        // Single instance: a second overlay would just stack on the first one
+        // and fail to register the hotkeys. Open the editor instead.
+        let name = wide(OVERLAY_MUTEX);
+        let mutex = CreateMutexW(null(), 1, name.as_ptr());
+        if mutex.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
+            spawn_menu(&path);
+            return Ok(());
+        }
+
         // Physical pixels everywhere, so a 1px line is really 1px at any scaling.
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let hinstance = GetModuleHandleW(null());
-        let class_name = wide("crosslay_overlay");
+        let class_name = wide(CLASS_NAME);
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -148,6 +202,9 @@ pub fn run(path: PathBuf, cfg: Config) -> Result<(), String> {
                 }
                 WM_TIMER if msg.wParam == TIMER_ID => app.tick(),
                 WM_APP_REPOSITION => app.redraw(),
+                WM_APP_RELOAD => {
+                    app.reload();
+                }
                 _ => {
                     DispatchMessageW(&msg);
                 }
@@ -185,6 +242,7 @@ impl App {
                     unsafe { MessageBeep(MB_ICONWARNING) };
                 }
             }
+            Action::Menu => spawn_menu(&self.path),
             Action::Quit => {}
         }
     }
@@ -275,7 +333,10 @@ impl App {
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
             return;
         }
-        let canvas = self.cfg.active().render();
+        let canvas = self
+            .cfg
+            .active()
+            .render_or_shapes(&crate::config::base_dir(&self.path));
         let rect = monitor_rect(self.cfg.monitor);
         let ch = self.cfg.active();
         let cx = rect.left + (rect.right - rect.left) / 2 + ch.offset_x;
