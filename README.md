@@ -88,7 +88,21 @@ cargo build --release
 ```
 
 The live overlay is Windows-only for now. `--preview`, the config handling, and the tests run
-anywhere. CI builds `crosslay.exe` on every push and uploads it as a workflow artifact.
+anywhere.
+
+### Prebuilt exe
+
+The **Build exe** workflow (`.github/workflows/build-exe.yml`) builds standalone x64 and ARM64
+exes. They don't need the Visual C++ Redistributable.
+
+- **Every push:** download the exe from the workflow run's *Artifacts* section in the Actions tab.
+- **On demand:** Actions → *Build exe* → *Run workflow*.
+- **Releases:** push a version tag and the zips are attached to a GitHub Release.
+
+  ```
+  git tag v0.1.0
+  git push origin v0.1.0
+  ```
 
 ## Layout
 

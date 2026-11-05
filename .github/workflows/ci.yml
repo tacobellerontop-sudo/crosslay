@@ -23,8 +23,3 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy -- -D warnings
-      - run: cargo build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: crosslay-windows-x64
-          path: target/release/crosslay.exe
