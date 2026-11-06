@@ -6,13 +6,18 @@ description = "A tiny, zero-overhead screen overlay (crosshairs first, images ne
 readme = "README.md"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.37", optional = true, default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 png = "0.18"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
 
+[features]
+default = ["menu"]
+# The crosshair editor (`--menu`). Without it the exe is overlay-only.
+menu = ["dep:eframe", "dep:rfd"]
+
 [target.'cfg(windows)'.dependencies]
-rfd = "0.17"
+rfd = { version = "0.17", optional = true }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

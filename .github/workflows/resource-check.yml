@@ -1,0 +1,46 @@
+name: Resource check
+
+# Measures what the running overlay costs (memory, CPU, loaded DLLs) with the
+# editor built in vs. an overlay-only build, so regressions are visible.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build single exe (overlay + editor)
+        run: cargo build --release --locked
+      - name: Build overlay-only exe
+        run: cargo build --release --locked --no-default-features --target-dir target/lite
+
+      - name: Measure single exe
+        shell: pwsh
+        run: ./scripts/measure-overlay.ps1 -Exe target/release/crosslay.exe -Label "single exe"
+      - name: Measure overlay-only exe
+        shell: pwsh
+        run: ./scripts/measure-overlay.ps1 -Exe target/lite/release/crosslay.exe -Label "overlay only"
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          $rows = Get-ChildItem "$env:RUNNER_TEMP/measure-*.json" | ForEach-Object { Get-Content $_ | ConvertFrom-Json }
+          $md = "| | " + (($rows | ForEach-Object { $_.label }) -join " | ") + " |`n|---|" + ("---|" * $rows.Count) + "`n"
+          foreach ($k in "exe_size_kb","working_set_kb","private_bytes_kb","peak_working_kb","cpu_ms_in_20s","threads","handles","module_count") {
+            $md += "| $k | " + (($rows | ForEach-Object { $_.$k }) -join " | ") + " |`n"
+          }
+          foreach ($r in $rows) { $md += "`n**$($r.label) modules:** $($r.modules)`n" }
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $md

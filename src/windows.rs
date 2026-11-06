@@ -98,6 +98,7 @@ struct App {
 const OVERLAY_MUTEX: &str = "Local\\crosslay-overlay";
 
 /// Whether an overlay is currently running.
+#[cfg_attr(not(feature = "menu"), allow(dead_code))]
 pub fn overlay_running() -> bool {
     let name = wide(OVERLAY_MUTEX);
     let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
@@ -110,6 +111,7 @@ pub fn overlay_running() -> bool {
 
 /// Tell a running overlay to reload its config right away (instead of on its
 /// next file check).
+#[cfg_attr(not(feature = "menu"), allow(dead_code))]
 pub fn notify_overlay() {
     let class = wide(CLASS_NAME);
     unsafe {

@@ -7,6 +7,7 @@ mod config;
 mod crosshair;
 mod hotkey;
 mod image;
+#[cfg(feature = "menu")]
 mod menu;
 mod png;
 
@@ -100,7 +101,10 @@ fn run() -> Result<(), String> {
 
     let path = args.config.unwrap_or_else(config::default_path);
     if args.menu {
+        #[cfg(feature = "menu")]
         return menu::run(path);
+        #[cfg(not(feature = "menu"))]
+        return Err("this build of crosslay does not include the editor".into());
     }
     let mut cfg = config::Config::load_or_create(&path)?;
     if let Some(p) = args.profile {

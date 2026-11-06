@@ -109,6 +109,7 @@ impl Crosshair {
 
     /// Like [`Self::render`], but falls back to the shapes if the image can't
     /// be loaded, so the overlay always shows something.
+    #[cfg_attr(not(feature = "menu"), allow(dead_code))]
     pub fn render_or_shapes(&self, base_dir: &Path) -> Canvas {
         self.render(base_dir).unwrap_or_else(|_| {
             let mut c = self.render_shapes();

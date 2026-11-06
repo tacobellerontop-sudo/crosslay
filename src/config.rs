@@ -155,6 +155,7 @@ impl Config {
     /// Validate and write the config (with the explanatory header) to `path`.
     /// Writes to a temporary file first so a running overlay never reads a
     /// half-written config.
+    #[cfg_attr(not(feature = "menu"), allow(dead_code))]
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
         if let Some(dir) = path.parent() {
