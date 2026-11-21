@@ -73,14 +73,26 @@ folder is used (portable mode). Otherwise it's `%APPDATA%\crosslay`.
 ### The editor (`crosslay-editor.exe`)
 
 - An egui app with live preview at real size or zoomed, on several backgrounds.
-- Shape crosshairs (arms, gap, thickness, T-style, dot, circle, outline, colours, opacity,
-  offset) and PNG crosshairs. PNGs are copied into `images/` so they keep working if the
+- Valorant-style crosshairs: colour, outlines, centre dot, and inner and outer lines with their
+  own opacity, length (optionally a separate vertical length), thickness and offset. Valorant
+  crosshair codes can be imported and exported. PNG crosshairs work too. PNGs are copied into `images/` so they keep working if the
   original moves.
 - Several profiles, which you can reorder, plus settings for the monitor and the hotkeys
   (validated before saving).
 - **Live apply:** each change is saved and baked after a short pause, so the running overlay
   updates while you drag a slider.
-- Command line: `--bake`, `--preview out.png`, `--print-config`, `--dir <folder>`.
+- Command line: `--bake`, `--update`, `--preview out.png`, `--print-config`, `--dir <folder>`.
+
+### Updates
+
+The overlay must stay offline and idle, so it never checks for updates itself. If `auto_update`
+is on, it starts `crosslay-editor --update` once at startup. That separate process asks GitHub
+Releases for the latest version and, if it's newer, downloads both exes. It then stops the overlay
+(a "please quit" window message), renames the running exes to `*.old` (Windows allows renaming a
+running exe but not overwriting it), moves the new ones into place, and restarts the overlay. The
+`*.old` files are deleted the next time the editor starts. Two guards stop an update loop: the
+release build fails if the tag doesn't match the version in `Cargo.toml`, and the updater
+remembers the last tag it installed.
 
 ### `overlay.bin` (format v1, little-endian)
 
@@ -88,7 +100,7 @@ folder is used (portable mode). Otherwise it's `%APPDATA%\crosslay`.
 |---|---|---|
 | 0 | 4 | magic `CLAY` |
 | 4 | 2 | version (1) |
-| 6 | 2 | flags (bit 0 = start visible) |
+| 6 | 2 | flags (bit 0 = start visible, bit 1 = auto update) |
 | 8 | 2 | monitor (0 = primary) |
 | 10 | 2 | startup profile |
 | 12 | 20 | 5 hotkeys × (modifiers u16, virtual key u16): toggle, editor, next, previous, quit. vk 0 = disabled |

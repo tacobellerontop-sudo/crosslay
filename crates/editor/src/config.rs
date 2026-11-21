@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::crosshair::Crosshair;
+use crate::crosshair::{Crosshair, Lines};
 use crate::hotkey::Hotkey;
 use crosslay_format::{Action, BAKED_FILE, CONFIG_FILE};
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ pub struct Config {
     pub profile: usize,
     /// Start with the overlay visible.
     pub visible: bool,
-    /// Accepted (and dropped) so configs from crosslay 0.1 still load.
-    #[serde(skip_serializing)]
-    live_reload: Option<bool>,
+    /// Check GitHub for a new version each time the overlay starts, and
+    /// install it.
+    pub auto_update: bool,
     pub hotkeys: Hotkeys,
     #[serde(rename = "crosshair")]
     pub crosshairs: Vec<Crosshair>,
@@ -27,14 +27,10 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct Hotkeys {
     pub toggle: String,
-    #[serde(alias = "menu")]
     pub editor: String,
     pub next: String,
     pub previous: String,
     pub quit: String,
-    /// crosslay 0.1 had a reload hotkey; the overlay now reloads by itself.
-    #[serde(skip_serializing)]
-    reload: Option<String>,
 }
 
 impl Default for Hotkeys {
@@ -45,7 +41,6 @@ impl Default for Hotkeys {
             next: "Ctrl+Alt+Right".into(),
             previous: "Ctrl+Alt+Left".into(),
             quit: "Ctrl+Alt+Q".into(),
-            reload: None,
         }
     }
 }
@@ -80,37 +75,45 @@ impl Default for Config {
             monitor: 0,
             profile: 0,
             visible: true,
-            live_reload: None,
+            auto_update: true,
             hotkeys: Hotkeys::default(),
             crosshairs: vec![
                 Crosshair::default(),
                 Crosshair {
+                    name: "Solid cross".into(),
+                    color: Color::rgb(0, 255, 0),
+                    inner_lines: Lines {
+                        opacity: 1.0,
+                        length: 5,
+                        offset: 0,
+                        ..Lines::INNER
+                    },
+                    outer_lines: Lines::HIDDEN,
+                    ..Default::default()
+                },
+                Crosshair {
                     name: "Dot".into(),
                     color: Color::rgb(0, 255, 255),
-                    length: 0,
                     center_dot: true,
-                    dot_size: 4,
+                    center_dot_thickness: 4,
+                    inner_lines: Lines::HIDDEN,
+                    outer_lines: Lines::HIDDEN,
                     ..Default::default()
                 },
                 Crosshair {
-                    name: "Circle".into(),
-                    color: Color::rgb(255, 255, 255),
-                    length: 0,
+                    name: "Wide".into(),
+                    color: Color::rgb(255, 255, 0),
                     center_dot: true,
-                    dot_size: 2,
-                    circle_radius: 10,
-                    circle_thickness: 2,
-                    ..Default::default()
-                },
-                Crosshair {
-                    name: "T".into(),
-                    color: Color::rgb(255, 0, 255),
-                    thickness: 1,
-                    length: 8,
-                    gap: 4,
-                    t_style: true,
-                    center_dot: true,
-                    dot_size: 1,
+                    inner_lines: Lines {
+                        opacity: 1.0,
+                        length: 10,
+                        separate_vertical: true,
+                        vertical_length: 3,
+                        thickness: 2,
+                        offset: 4,
+                        ..Lines::INNER
+                    },
+                    outer_lines: Lines::HIDDEN,
                     ..Default::default()
                 },
             ],
@@ -188,6 +191,7 @@ impl Config {
         });
         let settings = crosslay_format::Settings {
             visible: self.visible,
+            auto_update: self.auto_update,
             monitor: self.monitor.min(u16::MAX as usize) as u16,
             profile: (self.profile % self.crosshairs.len()) as u16,
             hotkeys,
@@ -243,17 +247,24 @@ pub fn config_text(cfg: &Config) -> String {
 # crosslay-editor. If you edit this file by hand, run
 # `crosslay-editor --bake` afterwards (opening the editor does it too).
 #
-# monitor   0 = primary monitor, 1.. = other monitors in system order
-# profile   index of the [[crosshair]] shown at startup (0 = first)
-# hotkeys   e.g. \"Ctrl+Alt+X\", \"Shift+F8\", \"Numpad5\"; \"\" disables a hotkey
+# monitor      0 = primary monitor, 1.. = other monitors in system order
+# profile      index of the [[crosshair]] shown at startup (0 = first)
+# auto_update  check for a new version when the overlay starts
+# hotkeys      e.g. \"Ctrl+Alt+X\", \"Shift+F8\", \"Numpad5\"; \"\" disables one
 #
-# Each [[crosshair]] is a profile you can cycle through. Fields:
+# Each [[crosshair]] is a profile you can cycle through. The settings follow
+# Valorant's crosshair menu. Fields:
 #   color / outline_color   \"#RRGGBB\" or \"#RRGGBBAA\"
-#   thickness, length, gap  arm geometry in pixels (length = 0 hides the arms)
-#   t_style                 hide the top arm
-#   center_dot, dot_size    square centre dot
-#   circle_radius           ring around the centre (0 = none), circle_thickness
-#   outline                 outline width in pixels (0 = none)
+#   outlines                border around every part, with outline_opacity
+#                           (0.0 to 1.0) and outline_thickness (px)
+#   center_dot              square dot, with center_dot_opacity and
+#                           center_dot_thickness (px)
+#   inner_lines / outer_lines
+#       show, opacity       on/off and 0.0 to 1.0
+#       length              left/right line length (px)
+#       separate_vertical   use vertical_length for the top/bottom lines
+#       thickness           line width (px)
+#       offset              gap from the centre (px); 0 = lines meet
 #   image                   PNG file to show instead of the shapes (\"\" = shapes);
 #                           relative paths are relative to this file's folder
 #   image_scale             scale factor for the image
@@ -326,7 +337,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.crosshairs.len(), 1);
         assert_eq!(cfg.active().color, Color::rgb(255, 0, 0));
-        assert_eq!(cfg.active().thickness, 2);
+        assert_eq!(cfg.active().inner_lines, Lines::INNER);
         let parsed = cfg.hotkeys.parsed().unwrap();
         assert_eq!(parsed.iter().flatten().count(), 4);
     }
@@ -356,21 +367,6 @@ mod tests {
         assert_eq!(dot.pixels, canvas.to_bgra_bytes().as_slice());
         assert_eq!(dot.anchor, (canvas.anchor.0 as u16, canvas.anchor.1 as u16));
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn loads_old_configs() {
-        let cfg = Config::parse(
-            r##"
-            live_reload = true
-            [hotkeys]
-            menu = "F9"
-            reload = "Ctrl+Alt+R"
-            "##,
-        )
-        .unwrap();
-        assert_eq!(cfg.hotkeys.editor, "F9");
-        assert!(!config_text(&cfg).contains("reload"));
     }
 
     #[test]

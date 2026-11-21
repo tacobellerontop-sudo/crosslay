@@ -65,8 +65,13 @@ program already uses one, the overlay tells you at startup and keeps running wit
 
 - **Profiles:** create, duplicate, delete, rename and reorder crosshairs, then cycle through them
   in game with the hotkeys.
-- **Shapes:** colour and transparency, arm length, thickness, gap, T-style, centre dot, circle,
-  outline, opacity and offset.
+- **Valorant-style settings:** colour, outlines (opacity, thickness), centre dot (opacity,
+  thickness), and **inner and outer lines**, each with show, opacity, length, thickness and
+  offset. Each set of lines can have a **separate vertical length**, so you can make a wide or
+  tall crosshair. An offset of 0 makes the lines meet in a solid cross.
+- **Valorant crosshair codes:** paste a code from Valorant (*Settings > Crosshair > Import
+  Profile Code*) to copy its primary crosshair, or copy any crosshair out as a code to use in the
+  game. Movement and firing error are ignored because they don't apply to an overlay.
 - **Your own PNG:** choose a file, type a path, or drop a PNG on the window. It's copied into an
   `images` folder so it keeps working if you move the original.
 - **Live preview** at real size or zoomed in, on game-like, dark, light or checkerboard
@@ -74,6 +79,8 @@ program already uses one, the overlay tells you at startup and keeps running wit
 - **Live apply** (on by default) saves each change after a short pause, and the running overlay
   updates straight away. Turn it off to use **Save** and **Revert** yourself.
 - **Start overlay** starts `crosslay.exe` if it isn't running.
+- **Updates:** a banner offers new versions, and *Settings & hotkeys > Updates* has
+  *Check now*. See [Updates](#updates).
 
 The crosshair selected in the editor is the one the overlay shows.
 
@@ -83,6 +90,8 @@ The crosshair selected in the editor is the one the overlay shows.
 crosslay-editor                    # open the editor
 crosslay-editor --bake             # bake config.toml into overlay.bin, no window
 crosslay-editor --preview out.png  # render the selected crosshair to a PNG
+crosslay-editor --update           # install a newer release, if there is one
+crosslay-editor --version          # print the version
 crosslay-editor --print-config     # print the default, commented config
 crosslay-editor --data-dir         # show which data folder is used
 crosslay-editor --dir <folder>     # use another data folder (works with all of the above)
@@ -106,9 +115,10 @@ If you edit `config.toml` by hand, run `crosslay-editor --bake` afterwards, or j
 editor, which re-bakes when the text file is newer. Here's what a crosshair looks like:
 
 ```toml
-monitor = 0          # 0 = primary monitor, 1.. = other monitors
-profile = 0          # crosshair shown at startup
+monitor = 0             # 0 = primary monitor, 1.. = other monitors
+profile = 0             # crosshair shown at startup
 visible = true
+auto_update = true      # check for a new version when the overlay starts
 
 [hotkeys]
 toggle = "Ctrl+Alt+X"
@@ -118,27 +128,57 @@ previous = "Ctrl+Alt+Left"
 quit = "Ctrl+Alt+Q"     # "" turns a hotkey off
 
 [[crosshair]]
-name = "Classic"
-color = "#00FF00"       # "#RRGGBB" or "#RRGGBBAA"
-thickness = 2
-length = 6              # 0 hides the arms
-gap = 3
-t_style = false         # hide the top arm
-center_dot = false
-dot_size = 2
-circle_radius = 0       # 0 = no circle
-circle_thickness = 1
-outline = 1             # 0 = no outline
+name = "Default"
+color = "#FFFFFF"       # "#RRGGBB" or "#RRGGBBAA"
+outlines = true
+outline_opacity = 0.5
+outline_thickness = 1
 outline_color = "#000000"
+center_dot = false
+center_dot_opacity = 1.0
+center_dot_thickness = 2
 image = ""              # PNG to show instead of the shapes, e.g. "images/scope.png"
 image_scale = 1.0
-opacity = 1.0           # 0.0 to 1.0
+opacity = 1.0           # 0.0 to 1.0, applies to the whole crosshair
 offset_x = 0
 offset_y = 0
+
+[crosshair.inner_lines]
+show = true
+opacity = 0.8
+length = 6              # left and right lines
+separate_vertical = false
+vertical_length = 6     # top and bottom lines, when separate_vertical = true
+thickness = 2
+offset = 3              # gap from the centre; 0 = the lines meet
+
+[crosshair.outer_lines]
+show = true
+opacity = 0.35
+length = 2
+separate_vertical = false
+vertical_length = 2
+thickness = 2
+offset = 10
 ```
 
-Configs from crosslay 0.1 still load. The old `live_reload` setting and `reload` hotkey are
-ignored, because the overlay now reloads by itself.
+These are Valorant's defaults. Any field you leave out takes its default.
+
+## Updates
+
+When `auto_update` is on (the default), the overlay starts `crosslay-editor --update` once each
+time it starts. That separate, short-lived process asks GitHub for the latest release. If it's
+newer, it downloads both exes, briefly stops the overlay, swaps the files, and starts the
+overlay again. The overlay itself never touches the network, and nothing runs after that check.
+
+- Turn it off in the editor (*Settings & hotkeys > Updates*) or with `auto_update = false`.
+- The editor also checks when it opens, and shows a banner with an **Install and restart**
+  button.
+- `crosslay-editor --update` runs the same check from a terminal.
+- Updates replace the exes in place, so keep them in a folder you can write to (not
+  `Program Files`).
+- Updates come from this repository's GitHub Releases over HTTPS, and only for the Windows
+  builds.
 
 ## Building
 
@@ -161,12 +201,15 @@ elsewhere, type a path or drop a file).
   pull request.
 - **Build** (`build.yml`) builds both exes for Windows x64 and ARM64 on every push. Download them
   from the run's *Artifacts* section in the Actions tab, or start it by hand with *Run workflow*.
-  Push a version tag to publish a GitHub Release with the zips attached:
+  Push a version tag to publish a GitHub Release with the zips and the bare exes the updater
+  uses. The tag must match `version` in the root `Cargo.toml` (the build fails otherwise):
 
   ```
-  git tag v0.2.0
-  git push origin v0.2.0
+  git tag v0.1.0
+  git push origin v0.1.0
   ```
+
+  For the next release, bump `version` in `Cargo.toml` first, then tag.
 
 - **Resource check** (`resource-check.yml`) starts the overlay on a Windows runner, lets it sit
   idle for 20 seconds, and reports its memory, CPU time, threads, handles and loaded DLLs in the
@@ -180,5 +223,6 @@ crates/
              No dependencies. Used by both apps.
   overlay/   crosslay: the overlay. Win32 only, depends on crosslay-format and windows-sys.
   editor/    crosslay-editor: the egui editor, config.toml handling, the crosshair
-             rasteriser, PNG import, and --bake / --preview.
+             rasteriser, PNG import, Valorant codes, the updater, and
+             --bake / --preview / --update.
 ```

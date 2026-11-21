@@ -59,6 +59,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// Posted to ourselves when the display layout changes.
 const WM_APP_REPOSITION: u32 = WM_APP + 1;
+/// Posted by the updater to ask the overlay to quit before replacing it.
+const WM_APP_QUIT: u32 = WM_APP + 2;
 const CLASS_NAME: &str = "crosslay_overlay";
 /// Held while an overlay runs, so a second one just exits.
 const MUTEX_NAME: &str = "Local\\crosslay-overlay";
@@ -209,6 +211,11 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
         drop(startup);
         let failed = app.register_hotkeys();
         app.redraw();
+        // The update check runs in a separate, short-lived editor process so
+        // the overlay itself never touches the network.
+        if app.settings.auto_update {
+            app.spawn_editor(&["--update"]);
+        }
         if !failed.is_empty() {
             message_box(
                 &format!(
@@ -240,6 +247,10 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                         None => {}
                     },
                     WM_APP_REPOSITION => app.redraw(),
+                    WM_APP_QUIT => {
+                        app.unregister_hotkeys();
+                        return Ok(());
+                    }
                     _ => {
                         DispatchMessageW(&msg);
                     }
@@ -331,20 +342,25 @@ impl App {
     }
 
     fn open_editor(&self) {
-        let ok = std::env::current_exe()
+        if !self.spawn_editor(&[]) {
+            unsafe { MessageBeep(MB_ICONWARNING) };
+        }
+    }
+
+    /// Start `crosslay-editor` from the overlay's folder with `args`.
+    fn spawn_editor(&self, args: &[&str]) -> bool {
+        std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|d| d.join(EDITOR_EXE)))
             .and_then(|editor| {
                 std::process::Command::new(editor)
+                    .args(args)
                     .arg("--dir")
                     .arg(&self.dir)
                     .spawn()
                     .ok()
             })
-            .is_some();
-        if !ok {
-            unsafe { MessageBeep(MB_ICONWARNING) };
-        }
+            .is_some()
     }
 
     /// Register the hotkeys from `settings`. Returns the ones that failed.

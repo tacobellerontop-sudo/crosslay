@@ -7,11 +7,13 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-# A private data folder with every hotkey turned off, so the run doesn't
-# depend on (or disturb) the desktop session.
+# A private data folder with every hotkey and the update check turned off, so
+# the run doesn't depend on (or disturb) the desktop session or the network.
 $dir = Join-Path $env:RUNNER_TEMP "crosslay-measure"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 @"
+auto_update = false
+
 [hotkeys]
 toggle = ""
 editor = ""

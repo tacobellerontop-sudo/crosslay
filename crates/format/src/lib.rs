@@ -10,7 +10,7 @@
 //! ```text
 //! 0   [u8; 4]  magic "CLAY"
 //! 4   u16      version (1)
-//! 6   u16      flags (bit 0 = start visible)
+//! 6   u16      flags (bit 0 = start visible, bit 1 = auto update)
 //! 8   u16      monitor (0 = primary)
 //! 10  u16      startup profile
 //! 12  5 x (u16 modifiers, u16 vk)   hotkeys, see [`Action`]; vk 0 = disabled
@@ -75,6 +75,8 @@ pub struct Hotkey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub visible: bool,
+    /// Start `crosslay-editor --update` when the overlay starts.
+    pub auto_update: bool,
     pub monitor: u16,
     pub profile: u16,
     /// Indexed by `Action as usize`.
@@ -85,6 +87,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             visible: true,
+            auto_update: true,
             monitor: 0,
             profile: 0,
             hotkeys: [Hotkey::default(); 5],
@@ -172,6 +175,7 @@ impl<'a> Baked<'a> {
         }
         let settings = Settings {
             visible: u16_at(bytes, 6) & 1 != 0,
+            auto_update: u16_at(bytes, 6) & 2 != 0,
             monitor: u16_at(bytes, 8),
             profile: u16_at(bytes, 10),
             hotkeys,
@@ -257,7 +261,8 @@ pub fn encode(settings: &Settings, frames: &[Frame<'_>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + body);
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&(settings.visible as u16).to_le_bytes());
+    let flags = settings.visible as u16 | (settings.auto_update as u16) << 1;
+    out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&settings.monitor.to_le_bytes());
     out.extend_from_slice(&settings.profile.to_le_bytes());
     for hk in settings.hotkeys {
@@ -313,6 +318,7 @@ mod tests {
         let b = [2u8; 4];
         let settings = Settings {
             visible: false,
+            auto_update: true,
             monitor: 2,
             profile: 1,
             hotkeys: [
@@ -361,6 +367,7 @@ mod tests {
         let bytes = sample();
         let baked = Baked::parse(&bytes).unwrap();
         assert!(!baked.settings.visible);
+        assert!(baked.settings.auto_update);
         assert_eq!(baked.settings.monitor, 2);
         assert_eq!(baked.settings.profile, 1);
         assert_eq!(baked.settings.hotkeys[Action::Quit as usize].vk, 0x51);

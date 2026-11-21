@@ -16,6 +16,8 @@ mod hotkey;
 mod image;
 mod menu;
 mod png;
+mod updater;
+mod valorant;
 #[cfg(windows)]
 mod win;
 
@@ -38,6 +40,10 @@ OPTIONS:
         --preview <FILE>    Render the startup crosshair to a PNG and exit
         --zoom <N>          Scale factor for --preview (default 8)
         --profile <N>       Crosshair index for --preview
+        --update            Install a newer release from GitHub, if there is one
+                            (the overlay runs this at startup when auto_update
+                            is on)
+        --version           Print the version and exit
         --print-config      Print the default config and exit
         --data-dir          Print the data folder that would be used and exit
     -h, --help              Show this help
@@ -46,6 +52,7 @@ OPTIONS:
 enum Mode {
     Gui,
     Bake,
+    Update,
     Preview(PathBuf),
 }
 
@@ -79,6 +86,13 @@ fn parse_args() -> Result<Command, String> {
         match arg.as_str() {
             "-d" | "--dir" => args.dir = Some(value(&arg)?.into()),
             "--bake" => args.mode = Mode::Bake,
+            "--update" => args.mode = Mode::Update,
+            "--version" => {
+                return Ok(Command::Print(format!(
+                    "crosslay-editor {}",
+                    updater::CURRENT
+                )));
+            }
             "--preview" => args.mode = Mode::Preview(value(&arg)?.into()),
             "--zoom" => {
                 args.zoom = value(&arg)?
@@ -119,7 +133,15 @@ fn run() -> Result<(), String> {
     let path = dir.join(CONFIG_FILE);
 
     match args.mode {
-        Mode::Gui => menu::run(dir),
+        Mode::Gui => {
+            updater::clean_up();
+            menu::run(dir)
+        }
+        Mode::Update => {
+            // Runs in the background from the overlay: never pop up a box.
+            QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+            updater::run_cli(&dir)
+        }
         Mode::Bake => {
             let cfg = Config::load_or_create(&path)?;
             cfg.save(&dir)?;
@@ -146,6 +168,9 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Report errors on stderr only (no message box).
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
     // From a terminal, errors go to the terminal. A message box is only for
     // when there's nowhere else to show them (and would hang scripts).
@@ -153,7 +178,7 @@ fn main() {
     let has_console = std::env::args_os().len() > 1 && win::attach_console();
     if let Err(msg) = run() {
         #[cfg(windows)]
-        if !has_console {
+        if !has_console && !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
             win::show_error(&msg);
         }
         eprintln!("crosslay-editor: {msg}");
