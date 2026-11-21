@@ -1,8 +1,7 @@
 //! Crosshair description and a CPU rasteriser that turns it into a [`Canvas`].
 //!
-//! Rendering happens only when the crosshair changes (startup, profile switch,
-//! config reload). The result is handed to the compositor once and never
-//! redrawn, so the overlay costs nothing per frame.
+//! This runs in the editor only. The pixels it produces are baked into
+//! `overlay.bin`, so the overlay never rasterises anything itself.
 //!
 //! A crosshair is either drawn from shapes (arms, dot, circle, outline) or,
 //! when `image` is set, taken from a PNG file.
@@ -76,7 +75,7 @@ impl Default for Crosshair {
 
 /// Upper bound for any single size parameter, to keep a typo in the config
 /// (e.g. `length = 100000`) from allocating gigabytes.
-const MAX_DIM: u32 = 1024;
+const MAX_DIM: u32 = 512;
 
 impl Crosshair {
     /// Whether this crosshair is drawn from a PNG instead of shapes.
@@ -109,7 +108,6 @@ impl Crosshair {
 
     /// Like [`Self::render`], but falls back to the shapes if the image can't
     /// be loaded, so the overlay always shows something.
-    #[cfg_attr(not(feature = "menu"), allow(dead_code))]
     pub fn render_or_shapes(&self, base_dir: &Path) -> Canvas {
         self.render(base_dir).unwrap_or_else(|_| {
             let mut c = self.render_shapes();

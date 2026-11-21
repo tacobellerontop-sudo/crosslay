@@ -1,7 +1,7 @@
 //! A tiny premultiplied-alpha image that every overlay layer renders into.
 //!
-//! Crosshairs render into a `Canvas` today; image overlays will produce one too,
-//! so the platform backends only ever need to know how to show a `Canvas`.
+//! The editor renders every crosshair into a `Canvas` and bakes its pixels
+//! into `overlay.bin` unchanged.
 
 /// Premultiplied BGRA pixels, stored as `0xAARRGGBB` words.
 ///
@@ -25,6 +25,11 @@ impl Canvas {
             pixels: vec![0; (width as usize) * (height as usize)],
             anchor,
         }
+    }
+
+    /// Premultiplied BGRA bytes, the layout of `overlay.bin` frames.
+    pub fn to_bgra_bytes(&self) -> Vec<u8> {
+        self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect()
     }
 
     /// Straight (non-premultiplied) RGBA bytes, handy for exporting previews.

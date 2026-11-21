@@ -1,14 +1,15 @@
-name: Build exe
+name: Build
 
-# Builds standalone crosslay.exe files.
-#  - Every push: exes are uploaded as workflow artifacts (Actions tab -> run -> Artifacts).
-#  - Run manually: Actions tab -> "Build exe" -> "Run workflow".
-#  - Push a tag like v0.1.0: the zips are also attached to a GitHub Release.
+# Builds crosslay.exe (overlay) and crosslay-editor.exe (editor) for Windows.
+#  - Every push: the exes are uploaded as workflow artifacts (Actions tab -> run -> Artifacts).
+#  - Run by hand: Actions tab -> "Build" -> "Run workflow".
+#  - Push a tag like v0.2.0: the zips are also attached to a GitHub Release.
 
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
           - arch: arm64
             target: aarch64-pc-windows-msvc
     env:
-      # Link the C runtime statically so the exe runs without the
+      # Link the C runtime statically so the exes run without the
       # Visual C++ Redistributable installed.
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
@@ -41,8 +42,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build overlay
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crosslay
+
+      - name: Build editor
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crosslay-editor
 
       - name: Package
         id: package
@@ -50,11 +54,13 @@ jobs:
         run: |
           $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ github.sha }}".Substring(0, 7) }
           $name = "crosslay-$version-windows-${{ matrix.arch }}"
+          $out = "target/${{ matrix.target }}/release"
           New-Item -ItemType Directory -Path dist/$name | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/crosslay.exe dist/$name/
-          Copy-Item README.md dist/$name/
+          Copy-Item $out/crosslay.exe, $out/crosslay-editor.exe, README.md dist/$name/
           Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
           "name=$name" >> $env:GITHUB_OUTPUT
+          $rows = Get-ChildItem dist/$name/*.exe | ForEach-Object { "| $($_.Name) | $([math]::Round($_.Length / 1KB)) KB |" }
+          "### ${{ matrix.arch }}`n`n| File | Size |`n|---|---|`n$($rows -join "`n")`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:

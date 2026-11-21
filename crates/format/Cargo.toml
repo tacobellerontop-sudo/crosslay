@@ -1,0 +1,7 @@
+[package]
+name = "crosslay-format"
+description = "The baked overlay.bin file shared by the crosslay overlay and editor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

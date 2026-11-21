@@ -1,15 +1,14 @@
-//! The crosshair editor ("menu").
+//! The crosshair editor window.
 //!
-//! Runs as its own process (`crosslay --menu`), separate from the overlay, so
-//! the overlay never carries a GUI toolkit or a GPU context. The editor's
-//! only connection to the overlay is the config file: every change is saved
-//! (debounced) and the overlay reloads it. On Windows it is also poked
-//! directly so it updates right away.
+//! Runs as its own program, so the overlay never carries a GUI toolkit or a
+//! GPU context. Every change is saved after a short pause: `config.toml` plus
+//! the baked `overlay.bin`, which a running overlay picks up immediately.
 
 use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::config::{self, Config};
 use crate::crosshair::Crosshair;
+use crosslay_format::CONFIG_FILE;
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, RichText, Sense, TextureHandle, TextureOptions, Vec2,
 };
@@ -19,8 +18,14 @@ use std::time::{Duration, Instant};
 /// How long the editor waits after the last change before saving.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
 
-pub fn run(path: PathBuf) -> Result<(), String> {
+pub fn run(dir: PathBuf) -> Result<(), String> {
+    let path = dir.join(CONFIG_FILE);
     let (cfg, warning) = match Config::load_or_create(&path) {
+        // Bring overlay.bin up to date if config.toml was edited by hand.
+        Ok(cfg) if config::needs_bake(&dir) => match cfg.save(&dir) {
+            Ok(()) => (cfg, None),
+            Err(e) => (cfg, Some(format!("Couldn't update the overlay: {e}"))),
+        },
         Ok(cfg) => (cfg, None),
         Err(e) => (
             Config::default(),
@@ -31,18 +36,18 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("crosslay")
+            .with_title("crosslay editor")
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([760.0, 500.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "crosslay",
+        "crosslay-editor",
         options,
-        Box::new(move |_cc| Ok(Box::new(Menu::new(path, cfg, warning)))),
+        Box::new(move |_cc| Ok(Box::new(Menu::new(dir, cfg, warning)))),
     )
-    .map_err(|e| format!("cannot open the menu: {e}"))
+    .map_err(|e| format!("cannot open the editor window: {e}"))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,8 +72,8 @@ struct Preview {
 }
 
 struct Menu {
-    path: PathBuf,
-    base: PathBuf,
+    /// The data folder: config.toml, overlay.bin and images/.
+    dir: PathBuf,
     cfg: Config,
     /// What is on disk, to know whether there is anything to save.
     saved: Config,
@@ -85,7 +90,7 @@ struct Menu {
 }
 
 impl Menu {
-    fn new(path: PathBuf, cfg: Config, warning: Option<String>) -> Self {
+    fn new(dir: PathBuf, cfg: Config, warning: Option<String>) -> Self {
         let selected = cfg.profile % cfg.crosshairs.len();
         let status = match warning {
             Some(w) => Status {
@@ -93,13 +98,12 @@ impl Menu {
                 error: true,
             },
             None => Status {
-                text: format!("Editing {}", path.display()),
+                text: format!("Editing {}", dir.join(CONFIG_FILE).display()),
                 error: false,
             },
         };
         let mut menu = Self {
-            base: config::base_dir(&path),
-            path,
+            dir,
             saved: cfg.clone(),
             prev: cfg.clone(),
             cfg,
@@ -142,14 +146,11 @@ impl Menu {
 
     fn save(&mut self) {
         self.cfg.profile = self.selected;
-        match self.cfg.save(&self.path) {
+        match self.cfg.save(&self.dir) {
             Ok(()) => {
                 self.saved = self.cfg.clone();
                 #[cfg(windows)]
-                let running = {
-                    crate::windows::notify_overlay();
-                    crate::windows::overlay_running()
-                };
+                let running = crate::win::overlay_running();
                 #[cfg(not(windows))]
                 let running = false;
                 let msg = if running {
@@ -164,7 +165,7 @@ impl Menu {
     }
 
     fn revert(&mut self) {
-        match Config::load(&self.path) {
+        match Config::load(&self.dir.join(CONFIG_FILE)) {
             Ok(cfg) => {
                 self.cfg = cfg.clone();
                 self.saved = cfg.clone();
@@ -181,7 +182,7 @@ impl Menu {
     /// working if the original moves) and return the path to store.
     fn import_png(&self, src: &Path) -> Result<String, String> {
         crate::image::load_png(src)?; // validate before copying
-        let images = self.base.join("images");
+        let images = self.dir.join("images");
         if src.parent().and_then(|p| p.canonicalize().ok()) == images.canonicalize().ok() {
             let name = src.file_name().unwrap_or_default().to_string_lossy();
             return Ok(format!("images/{name}"));
@@ -243,6 +244,26 @@ impl Menu {
                 self.set_status(format!("Created a crosshair from {}", src.display()), false);
             }
             Err(e) => self.set_status(e, true),
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_overlay(&mut self) {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("crosslay.exe")));
+        let started = exe.as_ref().is_some_and(|exe| {
+            std::process::Command::new(exe)
+                .arg("--dir")
+                .arg(&self.dir)
+                .spawn()
+                .is_ok()
+        });
+        if !started {
+            self.set_status(
+                "Couldn't start crosslay.exe; keep it next to the editor",
+                true,
+            );
         }
     }
 
@@ -369,7 +390,7 @@ impl Menu {
             }
             if ui
                 .button("Revert")
-                .on_hover_text("Reload the config file from disk")
+                .on_hover_text("Reload config.toml from disk")
                 .clicked()
             {
                 self.revert();
@@ -377,17 +398,16 @@ impl Menu {
             ui.separator();
             #[cfg(windows)]
             {
-                if crate::windows::overlay_running() {
+                if crate::win::overlay_running() {
                     ui.label(
                         RichText::new("Overlay running").color(Color32::from_rgb(80, 200, 120)),
                     );
-                } else if ui.button("Start overlay").clicked()
-                    && let Ok(exe) = std::env::current_exe()
+                } else if ui
+                    .button("Start overlay")
+                    .on_hover_text("Runs crosslay.exe from the editor's folder")
+                    .clicked()
                 {
-                    let _ = std::process::Command::new(exe)
-                        .arg("--config")
-                        .arg(&self.path)
-                        .spawn();
+                    self.start_overlay();
                 }
                 ui.separator();
             }
@@ -515,7 +535,7 @@ impl Menu {
                     let p = if raw.is_absolute() {
                         raw
                     } else {
-                        self.base.join(raw)
+                        self.dir.join(raw)
                     };
                     self.set_image(&p);
                 }
@@ -635,19 +655,12 @@ impl Menu {
             ui.label("Start visible");
             ui.checkbox(&mut self.cfg.visible, "");
             ui.end_row();
-            ui.label("Live reload");
-            ui.checkbox(
-                &mut self.cfg.live_reload,
-                "Overlay picks up config edits automatically",
-            );
-            ui.end_row();
             let hk = &mut self.cfg.hotkeys;
             for (label, value) in [
                 ("Show / hide", &mut hk.toggle),
-                ("Open menu", &mut hk.menu),
+                ("Open editor", &mut hk.editor),
                 ("Next crosshair", &mut hk.next),
                 ("Previous crosshair", &mut hk.previous),
-                ("Reload config", &mut hk.reload),
                 ("Quit overlay", &mut hk.quit),
             ] {
                 ui.label(label);
@@ -731,9 +744,9 @@ impl Menu {
         if self.preview.as_ref().is_some_and(|p| p.key == ch) {
             return;
         }
-        let (canvas, error) = match ch.render(&self.base) {
+        let (canvas, error) = match ch.render(&self.dir) {
             Ok(c) => (c, None),
-            Err(e) => (ch.render_or_shapes(&self.base), Some(e)),
+            Err(e) => (ch.render_or_shapes(&self.dir), Some(e)),
         };
         let texture = Some(ctx.load_texture(
             "crosshair-preview",

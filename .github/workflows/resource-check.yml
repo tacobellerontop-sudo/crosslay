@@ -1,7 +1,7 @@
 name: Resource check
 
-# Measures what the running overlay costs (memory, CPU, loaded DLLs) with the
-# editor built in vs. an overlay-only build, so regressions are visible.
+# Starts the overlay on a Windows runner and reports what it costs while idle
+# (memory, CPU time, threads, handles, loaded DLLs), so regressions show up.
 
 on:
   push:
@@ -21,26 +21,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build single exe (overlay + editor)
-        run: cargo build --release --locked
-      - name: Build overlay-only exe
-        run: cargo build --release --locked --no-default-features --target-dir target/lite
+      - name: Build
+        run: cargo build --release --locked -p crosslay -p crosslay-editor
 
-      - name: Measure single exe
+      - name: Measure overlay
         shell: pwsh
-        run: ./scripts/measure-overlay.ps1 -Exe target/release/crosslay.exe -Label "single exe"
-      - name: Measure overlay-only exe
-        shell: pwsh
-        run: ./scripts/measure-overlay.ps1 -Exe target/lite/release/crosslay.exe -Label "overlay only"
+        run: ./scripts/measure-overlay.ps1 -Overlay target/release/crosslay.exe -Editor target/release/crosslay-editor.exe
 
       - name: Summary
         shell: pwsh
         run: |
-          $rows = Get-ChildItem "$env:RUNNER_TEMP/measure-*.json" | ForEach-Object { Get-Content $_ | ConvertFrom-Json }
-          $md = "| | " + (($rows | ForEach-Object { $_.label }) -join " | ") + " |`n|---|" + ("---|" * $rows.Count) + "`n"
+          $r = Get-Content "$env:RUNNER_TEMP/measure.json" | ConvertFrom-Json
+          $md = "### Idle overlay`n`n| Metric | Value |`n|---|---|`n"
           foreach ($k in "exe_size_kb","working_set_kb","private_bytes_kb","peak_working_kb","cpu_ms_in_20s","threads","handles","module_count") {
-            $md += "| $k | " + (($rows | ForEach-Object { $_.$k }) -join " | ") + " |`n"
+            $md += "| $k | $($r.$k) |`n"
           }
-          foreach ($r in $rows) { $md += "`n**$($r.label) modules:** $($r.modules)`n" }
+          $md += "`n**Loaded modules:** $($r.modules)`n"
           $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           $md

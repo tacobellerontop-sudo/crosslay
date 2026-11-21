@@ -1,93 +1,121 @@
 # crosslay
 
-A tiny screen overlay written in Rust. It starts with crosshairs; image overlays come next.
+A crosshair overlay for Windows that costs nothing while you play, plus a separate editor for
+designing crosshairs.
 
 ![Default crosshair profiles](docs/profiles.png)
 
+crosslay is two programs:
+
+| Program | What it does | When it runs |
+|---|---|---|
+| `crosslay.exe` | Shows the crosshair. It draws once and then sleeps. | All the time while you play |
+| `crosslay-editor.exe` | Designs crosshairs and saves them for the overlay | Only while you're changing something |
+
+They never talk to each other directly. The editor writes a small file of ready-made pixels
+(`overlay.bin`), and the overlay shows it. See [idea.md](idea.md) for the full design and the
+reasoning behind it.
+
 ## Why it's light
 
-crosslay draws the crosshair **once**, hands the pixels to the Windows compositor (DWM) as a
-layered window, and then sleeps. It has no render loop, no GPU context, and doesn't poll
-every frame, so it adds no frame-time cost to your game:
+- **Drawn once.** The overlay hands its pixels to the Windows compositor once with
+  `UpdateLayeredWindow`. The compositor shows them on every frame; crosslay does nothing per
+  frame.
+- **No timers, no polling.** The overlay sleeps until Windows wakes it for a hotkey, a change in
+  its data folder, a display change, or a new foreground window (to stay on top). An idle
+  overlay uses 0 % CPU.
+- **Nothing to parse.** The editor bakes crosshairs into raw pixels, so the overlay has no config
+  parser, no PNG decoder and no drawing code. Its only dependency is the Windows API bindings.
+- **No GUI toolkit or GPU context in the overlay.** Those live in the editor, which you close
+  when you're done.
+- **Small release build:** size-optimised, LTO, `panic = "abort"`, stripped, and statically
+  linked so it needs no Visual C++ Redistributable.
 
-- One click-through, top-most, non-activating popup window (`WS_EX_LAYERED | WS_EX_TRANSPARENT`).
-  It never takes focus and doesn't appear in Alt+Tab.
-- Pixels go up through `UpdateLayeredWindow` only when something changes: startup, a profile
-  switch, a config edit, or a display change.
-- The main thread blocks in `GetMessageW`. A 1.5 s timer re-asserts top-most and checks the
-  config file's modified time. Nothing else runs.
-- It's DPI-aware per monitor, so a 1 px line is one physical pixel at any scaling.
-- The editor window runs as a **separate process**. The overlay never creates a GUI toolkit or
-  an OpenGL context. The editor's DLLs are delay-loaded, so the overlay process doesn't even map
-  them, and when you close the menu its memory is freed.
-- The release build uses LTO, `panic = "abort"`, and stripped symbols.
+It's an ordinary click-through, top-most window. It never takes focus, isn't in Alt+Tab, and
+doesn't touch any game process, so anti-cheat has nothing to object to. That also means it shows
+over **windowed and borderless-windowed** games, not exclusive fullscreen.
 
-It's a normal desktop window. It doesn't inject into or hook any game process. That means it
-shows over **windowed and borderless-windowed** games, not over exclusive fullscreen.
+## Getting started
 
-## Crosshair editor
+1. Download the zip for your PC (x64 or ARM64) from
+   [Releases](../../releases), or from a *Build* workflow run in the Actions tab.
+2. Unzip both exes into the same folder.
+3. Run `crosslay.exe`. You'll see a default green crosshair.
+4. Press **Ctrl+Alt+M** (or run `crosslay-editor.exe`) to design your own. Changes appear on the
+   overlay while you edit.
+
+To start crosslay with Windows, put a shortcut to `crosslay.exe` in `shell:startup`.
+
+## Hotkeys
+
+| Hotkey           | Action                       |
+|------------------|------------------------------|
+| `Ctrl+Alt+X`     | Show / hide the crosshair    |
+| `Ctrl+Alt+M`     | Open the editor              |
+| `Ctrl+Alt+Right` | Next crosshair               |
+| `Ctrl+Alt+Left`  | Previous crosshair           |
+| `Ctrl+Alt+Q`     | Quit the overlay             |
+
+You can change or turn off any of them in the editor under *Settings & hotkeys*. If another
+program already uses one, the overlay tells you at startup and keeps running without it.
+
+## The editor
 
 ![The crosshair editor](docs/menu.png)
 
-Press **`Ctrl+Alt+M`** while the overlay runs, run `crosslay --menu`, or launch `crosslay.exe`
-again while it's already running. In the editor you can:
+- **Profiles:** create, duplicate, delete, rename and reorder crosshairs, then cycle through them
+  in game with the hotkeys.
+- **Shapes:** colour and transparency, arm length, thickness, gap, T-style, centre dot, circle,
+  outline, opacity and offset.
+- **Your own PNG:** choose a file, type a path, or drop a PNG on the window. It's copied into an
+  `images` folder so it keeps working if you move the original.
+- **Live preview** at real size or zoomed in, on game-like, dark, light or checkerboard
+  backgrounds.
+- **Live apply** (on by default) saves each change after a short pause, and the running overlay
+  updates straight away. Turn it off to use **Save** and **Revert** yourself.
+- **Start overlay** starts `crosslay.exe` if it isn't running.
 
-- **Create, duplicate, delete, rename and reorder crosshairs.**
-- **Tune the shape:** colour and transparency, arm length, thickness, gap, T-style, centre dot,
-  circle, outline, opacity, and offset.
-- **Import your own PNG:** use *Choose PNG...*, type a path, or drop a PNG onto the window to make
-  a new crosshair from it. crosslay copies imported images into an `images` folder next to the
-  config, so the crosshair keeps working if you move or delete the original. You can scale the
-  image, and it stays pixel-sharp.
-- **Preview it live** at real size or zoomed in, on a game-like, dark, light or checkerboard
-  background.
-- **Change settings and hotkeys.** Invalid hotkeys are flagged before they're saved.
+The crosshair selected in the editor is the one the overlay shows.
 
-With **Live apply** on (the default), every change is saved and the running overlay updates
-straight away. The crosshair you select in the editor is the one the overlay shows. Turn Live
-apply off to use explicit **Save** / **Revert** instead.
-
-## Usage
+### Command line
 
 ```
-crosslay                     # run the overlay
-crosslay --menu              # open the crosshair editor
-crosslay --config my.toml    # use a specific config file
-crosslay --preview out.png   # render the startup crosshair to a PNG (works on any OS)
-crosslay --print-config      # print the default, commented config
-crosslay --config-path       # show which config file would be used
+crosslay-editor                    # open the editor
+crosslay-editor --bake             # bake config.toml into overlay.bin, no window
+crosslay-editor --preview out.png  # render the selected crosshair to a PNG
+crosslay-editor --print-config     # print the default, commented config
+crosslay-editor --data-dir         # show which data folder is used
+crosslay-editor --dir <folder>     # use another data folder (works with all of the above)
+crosslay --dir <folder>            # run the overlay on another data folder
 ```
 
-Default hotkeys (change them in the config):
+## Files
 
-| Hotkey           | Action                      |
-|------------------|-----------------------------|
-| `Ctrl+Alt+X`     | Show / hide the overlay     |
-| `Ctrl+Alt+M`     | Open the crosshair editor   |
-| `Ctrl+Alt+Right` | Next crosshair profile      |
-| `Ctrl+Alt+Left`  | Previous crosshair profile  |
-| `Ctrl+Alt+R`     | Reload the config           |
-| `Ctrl+Alt+Q`     | Quit                        |
+Both programs use the same data folder:
 
-## Configuration
+- `%APPDATA%\crosslay\` normally.
+- **Portable mode:** if a `config.toml` sits next to the exes, that folder is used instead.
 
-On first run crosslay writes a commented default config to `%APPDATA%\crosslay\config.toml`.
-If there's a `crosslay.toml` next to the executable, crosslay uses that file instead
-(portable mode). While crosslay runs, it applies edits as soon as you save the file.
+| File | Who writes it | What it is |
+|---|---|---|
+| `config.toml` | Editor (or you) | Your crosshairs and settings, as readable text |
+| `overlay.bin` | Editor | The same crosshairs baked into pixels. This is the only file the overlay reads |
+| `images/` | Editor | PNGs you imported |
+
+If you edit `config.toml` by hand, run `crosslay-editor --bake` afterwards, or just open the
+editor, which re-bakes when the text file is newer. Here's what a crosshair looks like:
 
 ```toml
 monitor = 0          # 0 = primary monitor, 1.. = other monitors
-profile = 0          # startup profile index
+profile = 0          # crosshair shown at startup
 visible = true
-live_reload = true
 
 [hotkeys]
 toggle = "Ctrl+Alt+X"
-menu = "Ctrl+Alt+M"
+editor = "Ctrl+Alt+M"
 next = "Ctrl+Alt+Right"
 previous = "Ctrl+Alt+Left"
-reload = "Ctrl+Alt+R"
-quit = "Ctrl+Alt+Q"     # "" disables a hotkey
+quit = "Ctrl+Alt+Q"     # "" turns a hotkey off
 
 [[crosshair]]
 name = "Classic"
@@ -104,43 +132,53 @@ outline = 1             # 0 = no outline
 outline_color = "#000000"
 image = ""              # PNG to show instead of the shapes, e.g. "images/scope.png"
 image_scale = 1.0
-opacity = 1.0           # 0.0 to 1.0, applies to the whole crosshair
+opacity = 1.0           # 0.0 to 1.0
 offset_x = 0
 offset_y = 0
 ```
 
-Add as many `[[crosshair]]` profiles as you like and cycle through them with the hotkeys.
+Configs from crosslay 0.1 still load. The old `live_reload` setting and `reload` hotkey are
+ignored, because the overlay now reloads by itself.
 
 ## Building
+
+You need Rust (stable). From the repository root:
 
 ```
 cargo build --release
 ```
 
-The live overlay is Windows-only for now. The editor (`--menu`), `--preview`, the config
-handling, and the tests run anywhere (the PNG file picker button is Windows-only; elsewhere, type
-a path or drag a file in).
+That builds `target/release/crosslay.exe` and `target/release/crosslay-editor.exe`. To build
+just one, add `-p crosslay` or `-p crosslay-editor`.
 
-### Prebuilt exe
+The overlay is Windows-only. On Linux and macOS it builds to a stub that says so. The editor,
+`--bake`, `--preview` and the tests run anywhere (the PNG file picker button is Windows-only;
+elsewhere, type a path or drop a file).
 
-The **Build exe** workflow (`.github/workflows/build-exe.yml`) builds standalone x64 and ARM64
-exes. They don't need the Visual C++ Redistributable.
+### GitHub Actions
 
-- **Every push:** download the exe from the workflow run's *Artifacts* section in the Actions tab.
-- **On demand:** Actions → *Build exe* → *Run workflow*.
-- **Releases:** push a version tag and the zips are attached to a GitHub Release.
+- **CI** (`ci.yml`) runs tests, `rustfmt` and Clippy on Linux and Windows for every push and
+  pull request.
+- **Build** (`build.yml`) builds both exes for Windows x64 and ARM64 on every push. Download them
+  from the run's *Artifacts* section in the Actions tab, or start it by hand with *Run workflow*.
+  Push a version tag to publish a GitHub Release with the zips attached:
 
   ```
-  git tag v0.1.0
-  git push origin v0.1.0
+  git tag v0.2.0
+  git push origin v0.2.0
   ```
+
+- **Resource check** (`resource-check.yml`) starts the overlay on a Windows runner, lets it sit
+  idle for 20 seconds, and reports its memory, CPU time, threads, handles and loaded DLLs in the
+  run summary.
 
 ## Layout
 
-- `src/crosshair.rs` turns a crosshair description (shapes or a PNG) into pixels.
-- `src/menu.rs` is the crosshair editor (egui), run as a separate process.
-- `src/image.rs` handles PNG loading and scaling.
-- `src/canvas.rs` holds premultiplied BGRA images. Every overlay layer renders into one.
-- `src/windows.rs` is the Win32 backend: a layered window, hotkeys, and live reload.
-- `src/config.rs`, `src/hotkey.rs` and `src/color.rs` handle the config format and parsing.
-- `src/png.rs` is a dependency-free PNG writer for `--preview`.
+```
+crates/
+  format/    crosslay-format: the overlay.bin reader and writer, plus the data-folder rule.
+             No dependencies. Used by both apps.
+  overlay/   crosslay: the overlay. Win32 only, depends on crosslay-format and windows-sys.
+  editor/    crosslay-editor: the egui editor, config.toml handling, the crosshair
+             rasteriser, PNG import, and --bake / --preview.
+```
