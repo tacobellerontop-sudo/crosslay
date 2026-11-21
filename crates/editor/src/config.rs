@@ -120,6 +120,8 @@ impl Default for Config {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
+        // Notepad and Windows PowerShell like to add a UTF-8 byte order mark.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let cfg: Config = toml::from_str(text).map_err(|e| e.to_string())?;
         cfg.validate()?;
         Ok(cfg)
@@ -369,6 +371,12 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.hotkeys.editor, "F9");
         assert!(!config_text(&cfg).contains("reload"));
+    }
+
+    #[test]
+    fn accepts_byte_order_mark() {
+        let cfg = Config::parse("\u{feff}monitor = 1").unwrap();
+        assert_eq!(cfg.monitor, 1);
     }
 
     #[test]

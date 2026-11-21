@@ -147,13 +147,15 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    // From a terminal, errors go to the terminal. A message box is only for
+    // when there's nowhere else to show them (and would hang scripts).
     #[cfg(windows)]
-    if std::env::args_os().len() > 1 {
-        win::attach_console();
-    }
+    let has_console = std::env::args_os().len() > 1 && win::attach_console();
     if let Err(msg) = run() {
         #[cfg(windows)]
-        win::show_error(&msg);
+        if !has_console {
+            win::show_error(&msg);
+        }
         eprintln!("crosslay-editor: {msg}");
         std::process::exit(1);
     }

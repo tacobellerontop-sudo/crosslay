@@ -27,9 +27,9 @@ pub fn show_error(msg: &str) {
 }
 
 /// Release builds use the GUI subsystem; reattach to the launching terminal
-/// (if any) so `--help` and friends can print.
-pub fn attach_console() {
-    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+/// (if any) so `--help` and friends can print. Returns whether there is one.
+pub fn attach_console() -> bool {
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) != 0 }
 }
 
 /// Whether the overlay is running.

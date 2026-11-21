@@ -19,8 +19,10 @@ next = ""
 previous = ""
 quit = ""
 "@ | Set-Content -Encoding utf8 (Join-Path $dir "config.toml")
-& $Editor --dir $dir --bake
-if ($LASTEXITCODE -ne 0) { throw "baking failed" }
+# The editor is a GUI-subsystem exe, so `&` wouldn't wait for it.
+$bake = Start-Process -FilePath $Editor -ArgumentList "--dir", "`"$dir`"", "--bake" -NoNewWindow -Wait -PassThru
+if ($bake.ExitCode -ne 0) { throw "baking failed with code $($bake.ExitCode)" }
+if (-not (Test-Path (Join-Path $dir "overlay.bin"))) { throw "baking wrote no overlay.bin" }
 
 $p = Start-Process -FilePath $Overlay -ArgumentList "--dir", "`"$dir`"" -PassThru
 Start-Sleep -Seconds 5
