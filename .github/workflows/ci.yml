@@ -1,34 +1,140 @@
 name: CI
 
+# One pipeline for everything:
+#   test     fmt, clippy and tests on Linux and Windows
+#   build    release exes for Windows x64 and ARM64 (download from the run's Artifacts)
+#   measure  runs the x64 overlay idle for 20 s and reports its cost in the run summary
+#   release  on a v* tag: publishes a GitHub Release with zips and the bare exes
+#            the in-app updater downloads
+#
+# Runs on every push (branches and tags) and by hand from the Actions tab.
+
 on:
   push:
-  pull_request:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  linux:
-    name: Test (Linux)
-    runs-on: ubuntu-latest
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
 
-  windows:
-    name: Test (Windows)
+  build:
+    name: Build (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      # Static C runtime: the exes run without the Visual C++ Redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches the version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} doesn't match version $version in Cargo.toml. Bump the version first, or the updater would reinstall this release forever."
+          }
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crosslay -p crosslay-editor
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $out = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item $out/crosslay.exe, $out/crosslay-editor.exe, README.md dist/
+          $rows = Get-ChildItem dist/*.exe | ForEach-Object { "| $($_.Name) | $([math]::Round($_.Length / 1KB)) KB |" }
+          "### ${{ matrix.arch }}`n`n| File | Size |`n|---|---|`n$($rows -join "`n")`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: crosslay-windows-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  measure:
+    name: Measure idle overlay
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: crosslay-windows-x64
+          path: dist
+      - shell: pwsh
+        run: ./scripts/measure-overlay.ps1 -Overlay dist/crosslay.exe -Editor dist/crosslay-editor.exe
+
+  release:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: [test, build, measure]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: crosslay-windows-*
+          path: dist
+
+      - name: Package
+        run: |
+          cd dist
+          for arch in x64 arm64; do
+            dir="crosslay-windows-$arch"
+            # Bare exes for the in-app updater.
+            cp "$dir/crosslay.exe" "crosslay-windows-$arch.exe"
+            cp "$dir/crosslay-editor.exe" "crosslay-editor-windows-$arch.exe"
+            (cd "$dir" && zip -q "../crosslay-${GITHUB_REF_NAME}-windows-$arch.zip" *)
+          done
+          ls -l
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.exe
+          generate_release_notes: true

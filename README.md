@@ -38,7 +38,7 @@ over **windowed and borderless-windowed** games, not exclusive fullscreen.
 ## Getting started
 
 1. Download the zip for your PC (x64 or ARM64) from
-   [Releases](../../releases), or from a *Build* workflow run in the Actions tab.
+   [Releases](../../releases), or from the latest *CI* run in the Actions tab.
 2. Unzip both exes into the same folder.
 3. Run `crosslay.exe`. You'll see a default green crosshair.
 4. Press **Ctrl+Alt+M** (or run `crosslay-editor.exe`) to design your own. Changes appear on the
@@ -197,23 +197,24 @@ elsewhere, type a path or drop a file).
 
 ### GitHub Actions
 
-- **CI** (`ci.yml`) runs tests, `rustfmt` and Clippy on Linux and Windows for every push and
-  pull request.
-- **Build** (`build.yml`) builds both exes for Windows x64 and ARM64 on every push. Download them
-  from the run's *Artifacts* section in the Actions tab, or start it by hand with *Run workflow*.
-  Push a version tag to publish a GitHub Release with the zips and the bare exes the updater
-  uses. The tag must match `version` in the root `Cargo.toml` (the build fails otherwise):
+One workflow, **CI** (`.github/workflows/ci.yml`), runs on every push and can be started by hand
+from the Actions tab (*Run workflow*). It has four jobs:
 
-  ```
-  git tag v0.1.0
-  git push origin v0.1.0
-  ```
+1. **Test** runs `rustfmt`, Clippy and the tests on Linux and Windows.
+2. **Build** builds both exes for Windows x64 and ARM64. Download them from the run's
+   *Artifacts* section, and see their sizes in the run summary.
+3. **Measure** runs the x64 overlay idle for 20 seconds and puts its memory, CPU time, threads,
+   handles and loaded DLLs in the run summary.
+4. **Release** runs only for a version tag. It publishes a GitHub Release with a zip per
+   architecture plus the bare exes the updater downloads.
 
-  For the next release, bump `version` in `Cargo.toml` first, then tag.
+To release, bump `version` in the root `Cargo.toml`, merge, then tag. The build fails if the tag
+and the version don't match:
 
-- **Resource check** (`resource-check.yml`) starts the overlay on a Windows runner, lets it sit
-  idle for 20 seconds, and reports its memory, CPU time, threads, handles and loaded DLLs in the
-  run summary.
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## Layout
 

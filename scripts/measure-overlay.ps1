@@ -48,4 +48,10 @@ $result = [ordered]@{
     modules          = ($modules -join " ")
 }
 Stop-Process -Id $p.Id -Force
-$result | ConvertTo-Json | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "measure.json")
+$result | ConvertTo-Json
+
+# Run summary.
+$md = "### Idle overlay`n`n| Metric | Value |`n|---|---|`n"
+foreach ($k in $result.Keys | Where-Object { $_ -ne "modules" }) { $md += "| $k | $($result[$k]) |`n" }
+$md += "`n**Loaded modules:** $($result.modules)`n"
+if ($env:GITHUB_STEP_SUMMARY) { $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
