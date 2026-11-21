@@ -208,13 +208,14 @@ from the Actions tab (*Run workflow*). It has four jobs:
 4. **Release** runs only for a version tag. It publishes a GitHub Release with a zip per
    architecture plus the bare exes the updater downloads.
 
-To release, bump `version` in the root `Cargo.toml`, merge, then tag. The build fails if the tag
-and the version don't match:
+To release, bump `version` in the root `Cargo.toml` and merge. Then either:
 
-```
-git tag v0.1.0
-git push origin v0.1.0
-```
+- In the Actions tab, open **CI**, choose **Run workflow** on the default branch, tick
+  **Publish a release** and run it. The release job creates the `v<version>` tag itself.
+- Or push a tag yourself: `git tag v0.1.0 && git push origin v0.1.0`.
+
+Either way, the release fails if the tag and the version don't match, so the updater never sees a
+release that reports the wrong version.
 
 ## Layout
 
