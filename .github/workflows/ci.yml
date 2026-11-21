@@ -4,8 +4,10 @@ name: CI
 #   test     fmt, clippy and tests on Linux and Windows
 #   build    release exes for Windows x64 and ARM64 (download from the run's Artifacts)
 #   measure  runs the x64 overlay idle for 20 s and reports its cost in the run summary
-#   release  on a v* tag: publishes a GitHub Release with zips and the bare exes
-#            the in-app updater downloads
+#   release  publishes a GitHub Release with zips and the bare exes the in-app
+#            updater downloads. Runs for a pushed v* tag, or when started by hand
+#            with "Publish a release" ticked (it then creates the v<version> tag
+#            from Cargo.toml on the commit it built).
 #
 # Runs on every push (branches and tags) and by hand from the Actions tab.
 
@@ -14,6 +16,11 @@ on:
     branches: ["**"]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a release (tag v<version> from Cargo.toml) after the build
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -109,18 +116,35 @@ jobs:
 
   release:
     name: Publish release
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || inputs.release
     needs: [test, build, measure]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Work out the tag
+        id: tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"; else tag="v$version"; fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag doesn't match version $version in Cargo.toml"; exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" != tag ] && git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag already exists. Bump the version in Cargo.toml first."; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v5
         with:
           pattern: crosslay-windows-*
           path: dist
 
       - name: Package
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           cd dist
           for arch in x64 arm64; do
@@ -128,12 +152,14 @@ jobs:
             # Bare exes for the in-app updater.
             cp "$dir/crosslay.exe" "crosslay-windows-$arch.exe"
             cp "$dir/crosslay-editor.exe" "crosslay-editor-windows-$arch.exe"
-            (cd "$dir" && zip -q "../crosslay-${GITHUB_REF_NAME}-windows-$arch.zip" *)
+            (cd "$dir" && zip -q "../crosslay-${TAG}-windows-$arch.zip" *)
           done
           ls -l
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/*.zip
             dist/*.exe
