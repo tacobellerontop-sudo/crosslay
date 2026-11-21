@@ -1,35 +1,15 @@
-[package]
-name = "crosslay"
+[workspace]
+resolver = "3"
+members = ["crates/format", "crates/overlay", "crates/editor"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A tiny, zero-overhead screen overlay (crosshairs first, images next)"
-readme = "README.md"
+repository = "https://github.com/tacobellerontop-sudo/crosslay"
 
-[dependencies]
-eframe = { version = "0.37", optional = true, default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
-png = "0.18"
-serde = { version = "1.0.229", features = ["derive"] }
-toml = "1.2.0"
-
-[features]
-default = ["menu"]
-# The crosshair editor (`--menu`). Without it the exe is overlay-only.
-menu = ["dep:eframe", "dep:rfd"]
-
-[target.'cfg(windows)'.dependencies]
-rfd = { version = "0.17", optional = true }
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Security",
-    "Win32_System_Console",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
-] }
+[workspace.dependencies]
+crosslay-format = { path = "crates/format" }
+windows-sys = "0.59"
 
 [profile.release]
 opt-level = 3
@@ -37,3 +17,10 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The overlay runs all the time; smaller beats faster for code that runs once.
+[profile.release.package.crosslay]
+opt-level = "z"
+
+[profile.release.package.crosslay-format]
+opt-level = "z"

@@ -1,26 +1,33 @@
-//! The crosshair editor ("menu").
+//! The crosshair editor window.
 //!
-//! Runs as its own process (`crosslay --menu`), separate from the overlay, so
-//! the overlay never carries a GUI toolkit or a GPU context. The editor's
-//! only connection to the overlay is the config file: every change is saved
-//! (debounced) and the overlay reloads it. On Windows it is also poked
-//! directly so it updates right away.
+//! Runs as its own program, so the overlay never carries a GUI toolkit or a
+//! GPU context. Every change is saved after a short pause: `config.toml` plus
+//! the baked `overlay.bin`, which a running overlay picks up immediately.
 
 use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::config::{self, Config};
-use crate::crosshair::Crosshair;
+use crate::crosshair::{Crosshair, Lines};
+use crate::updater::{self, Release};
+use crosslay_format::CONFIG_FILE;
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, RichText, Sense, TextureHandle, TextureOptions, Vec2,
 };
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long the editor waits after the last change before saving.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
 
-pub fn run(path: PathBuf) -> Result<(), String> {
+pub fn run(dir: PathBuf) -> Result<(), String> {
+    let path = dir.join(CONFIG_FILE);
     let (cfg, warning) = match Config::load_or_create(&path) {
+        // Bring overlay.bin up to date if config.toml was edited by hand.
+        Ok(cfg) if config::needs_bake(&dir) => match cfg.save(&dir) {
+            Ok(()) => (cfg, None),
+            Err(e) => (cfg, Some(format!("Couldn't update the overlay: {e}"))),
+        },
         Ok(cfg) => (cfg, None),
         Err(e) => (
             Config::default(),
@@ -31,18 +38,18 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("crosslay")
+            .with_title(format!("crosslay editor {}", updater::CURRENT))
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([760.0, 500.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "crosslay",
+        "crosslay-editor",
         options,
-        Box::new(move |_cc| Ok(Box::new(Menu::new(path, cfg, warning)))),
+        Box::new(move |cc| Ok(Box::new(Menu::new(dir, cfg, warning, &cc.egui_ctx)))),
     )
-    .map_err(|e| format!("cannot open the menu: {e}"))
+    .map_err(|e| format!("cannot open the editor window: {e}"))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,8 +74,8 @@ struct Preview {
 }
 
 struct Menu {
-    path: PathBuf,
-    base: PathBuf,
+    /// The data folder: config.toml, overlay.bin and images/.
+    dir: PathBuf,
     cfg: Config,
     /// What is on disk, to know whether there is anything to save.
     saved: Config,
@@ -82,10 +89,25 @@ struct Menu {
     zoom: u32,
     background: Background,
     image_input: String,
+    /// Text in the Valorant code box.
+    code_input: String,
+    /// Update check / install, driven by a background thread.
+    update: Arc<Mutex<UpdateState>>,
+}
+
+#[derive(Clone)]
+enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(Release),
+    Installing(Release),
+    Installed(Release),
+    Failed(String),
 }
 
 impl Menu {
-    fn new(path: PathBuf, cfg: Config, warning: Option<String>) -> Self {
+    fn new(dir: PathBuf, cfg: Config, warning: Option<String>, ctx: &egui::Context) -> Self {
         let selected = cfg.profile % cfg.crosshairs.len();
         let status = match warning {
             Some(w) => Status {
@@ -93,13 +115,12 @@ impl Menu {
                 error: true,
             },
             None => Status {
-                text: format!("Editing {}", path.display()),
+                text: format!("Editing {}", dir.join(CONFIG_FILE).display()),
                 error: false,
             },
         };
         let mut menu = Self {
-            base: config::base_dir(&path),
-            path,
+            dir,
             saved: cfg.clone(),
             prev: cfg.clone(),
             cfg,
@@ -111,8 +132,13 @@ impl Menu {
             zoom: 6,
             background: Background::Scene,
             image_input: String::new(),
+            code_input: String::new(),
+            update: Arc::new(Mutex::new(UpdateState::Idle)),
         };
         menu.sync_image_input();
+        if menu.cfg.auto_update && cfg!(windows) {
+            menu.check_for_update(ctx);
+        }
         menu
     }
 
@@ -142,14 +168,11 @@ impl Menu {
 
     fn save(&mut self) {
         self.cfg.profile = self.selected;
-        match self.cfg.save(&self.path) {
+        match self.cfg.save(&self.dir) {
             Ok(()) => {
                 self.saved = self.cfg.clone();
                 #[cfg(windows)]
-                let running = {
-                    crate::windows::notify_overlay();
-                    crate::windows::overlay_running()
-                };
+                let running = crate::win::overlay_running();
                 #[cfg(not(windows))]
                 let running = false;
                 let msg = if running {
@@ -164,7 +187,7 @@ impl Menu {
     }
 
     fn revert(&mut self) {
-        match Config::load(&self.path) {
+        match Config::load(&self.dir.join(CONFIG_FILE)) {
             Ok(cfg) => {
                 self.cfg = cfg.clone();
                 self.saved = cfg.clone();
@@ -181,7 +204,7 @@ impl Menu {
     /// working if the original moves) and return the path to store.
     fn import_png(&self, src: &Path) -> Result<String, String> {
         crate::image::load_png(src)?; // validate before copying
-        let images = self.base.join("images");
+        let images = self.dir.join("images");
         if src.parent().and_then(|p| p.canonicalize().ok()) == images.canonicalize().ok() {
             let name = src.file_name().unwrap_or_default().to_string_lossy();
             return Ok(format!("images/{name}"));
@@ -246,6 +269,125 @@ impl Menu {
         }
     }
 
+    #[cfg(windows)]
+    fn start_overlay(&mut self) {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("crosslay.exe")));
+        let started = exe.as_ref().is_some_and(|exe| {
+            std::process::Command::new(exe)
+                .arg("--dir")
+                .arg(&self.dir)
+                .spawn()
+                .is_ok()
+        });
+        if !started {
+            self.set_status(
+                "Couldn't start crosslay.exe; keep it next to the editor",
+                true,
+            );
+        }
+    }
+
+    fn update_state(&self) -> UpdateState {
+        self.update
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or(UpdateState::Idle)
+    }
+
+    /// Run `job` on a background thread, showing `busy` meanwhile.
+    fn run_update_job(
+        &self,
+        ctx: &egui::Context,
+        busy: UpdateState,
+        job: impl FnOnce() -> UpdateState + Send + 'static,
+    ) {
+        if let Ok(mut s) = self.update.lock() {
+            *s = busy;
+        }
+        let state = Arc::clone(&self.update);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = job();
+            if let Ok(mut s) = state.lock() {
+                *s = result;
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn check_for_update(&self, ctx: &egui::Context) {
+        self.run_update_job(ctx, UpdateState::Checking, || match updater::check() {
+            Ok(Some(rel)) => UpdateState::Available(rel),
+            Ok(None) => UpdateState::UpToDate,
+            Err(e) => UpdateState::Failed(e),
+        });
+    }
+
+    fn install_update(&self, ctx: &egui::Context, rel: Release) {
+        let dir = self.dir.clone();
+        self.run_update_job(ctx, UpdateState::Installing(rel.clone()), move || {
+            match updater::install(&rel, &dir) {
+                Ok(()) => UpdateState::Installed(rel),
+                Err(e) => UpdateState::Failed(e),
+            }
+        });
+    }
+
+    /// Start the freshly installed editor and close this one.
+    fn restart(&self, ctx: &egui::Context) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe)
+                .arg("--dir")
+                .arg(&self.dir)
+                .spawn();
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// A strip across the top when there's an update to act on.
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let state = self.update_state();
+        let ctx = ui.ctx().clone();
+        let show = matches!(
+            state,
+            UpdateState::Available(_) | UpdateState::Installing(_) | UpdateState::Installed(_)
+        );
+        if !show {
+            return;
+        }
+        egui::Panel::top("update").show(ui, |ui| {
+            ui.horizontal(|ui| match &state {
+                UpdateState::Available(rel) => {
+                    ui.label(
+                        RichText::new(format!("crosslay {} is available", rel.version)).strong(),
+                    );
+                    if ui.button("Install and restart").clicked() {
+                        self.install_update(&ctx, rel.clone());
+                    }
+                    if !rel.url.is_empty() {
+                        ui.hyperlink_to("What's new", &rel.url);
+                    }
+                }
+                UpdateState::Installing(rel) => {
+                    ui.spinner();
+                    ui.label(format!("Installing crosslay {}...", rel.version));
+                }
+                UpdateState::Installed(rel) => {
+                    ui.label(
+                        RichText::new(format!("Updated to crosslay {}", rel.version))
+                            .color(Color32::from_rgb(80, 200, 120)),
+                    );
+                    if ui.button("Restart editor").clicked() {
+                        self.restart(&ctx);
+                    }
+                }
+                _ => {}
+            });
+        });
+    }
+
     fn unique_name(&self, base: &str) -> String {
         let taken = |n: &str| self.cfg.crosshairs.iter().any(|c| c.name == n);
         if !taken(base) {
@@ -279,6 +421,7 @@ impl eframe::App for Menu {
         ui.spacing_mut().slider_width = 160.0;
         self.handle_dropped_files(&ctx);
 
+        self.update_banner(ui);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("profiles")
             .resizable(false)
@@ -369,7 +512,7 @@ impl Menu {
             }
             if ui
                 .button("Revert")
-                .on_hover_text("Reload the config file from disk")
+                .on_hover_text("Reload config.toml from disk")
                 .clicked()
             {
                 self.revert();
@@ -377,17 +520,16 @@ impl Menu {
             ui.separator();
             #[cfg(windows)]
             {
-                if crate::windows::overlay_running() {
+                if crate::win::overlay_running() {
                     ui.label(
                         RichText::new("Overlay running").color(Color32::from_rgb(80, 200, 120)),
                     );
-                } else if ui.button("Start overlay").clicked()
-                    && let Ok(exe) = std::env::current_exe()
+                } else if ui
+                    .button("Start overlay")
+                    .on_hover_text("Runs crosslay.exe from the editor's folder")
+                    .clicked()
                 {
-                    let _ = std::process::Command::new(exe)
-                        .arg("--config")
-                        .arg(&self.path)
-                        .spawn();
+                    self.start_overlay();
                 }
                 ui.separator();
             }
@@ -515,7 +657,7 @@ impl Menu {
                     let p = if raw.is_absolute() {
                         raw
                     } else {
-                        self.base.join(raw)
+                        self.dir.join(raw)
                     };
                     self.set_image(&p);
                 }
@@ -541,56 +683,108 @@ impl Menu {
         let uses_image = self.current().uses_image();
         let ch = self.current();
 
-        // ---- Shapes ------------------------------------------------------
-        section(ui, "Shape", |ui| {
+        // ---- Shapes (Valorant-style) -------------------------------------
+        let disabled_note = |ui: &mut egui::Ui| {
             if uses_image {
                 ui.label(RichText::new("Shapes are hidden while an image is set.").weak());
             }
+        };
+        section(ui, "Crosshair", |ui| {
+            disabled_note(ui);
             ui.add_enabled_ui(!uses_image, |ui| {
-                grid(ui, "shape_grid", |ui| {
+                grid(ui, "primary_grid", |ui| {
                     ui.label("Color");
                     color_edit(ui, &mut ch.color);
                     ui.end_row();
-                    ui.label("Arm length");
-                    ui.add(egui::Slider::new(&mut ch.length, 0..=60).suffix(" px"));
+
+                    ui.label("Outlines");
+                    ui.checkbox(&mut ch.outlines, "");
                     ui.end_row();
-                    ui.label("Thickness");
-                    ui.add(egui::Slider::new(&mut ch.thickness, 1..=20).suffix(" px"));
+                    ui.add_enabled_ui(ch.outlines, |ui| {
+                        ui.label("    Outline opacity");
+                    });
+                    ui.add_enabled(ch.outlines, opacity_slider(&mut ch.outline_opacity));
                     ui.end_row();
-                    ui.label("Gap");
-                    ui.add(egui::Slider::new(&mut ch.gap, 0..=60).suffix(" px"));
+                    ui.add_enabled_ui(ch.outlines, |ui| {
+                        ui.label("    Outline thickness");
+                    });
+                    ui.add_enabled_ui(ch.outlines, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(px_slider(&mut ch.outline_thickness, 1..=6));
+                            color_edit(ui, &mut ch.outline_color);
+                        });
+                    });
                     ui.end_row();
-                    ui.label("T-style");
-                    ui.checkbox(&mut ch.t_style, "Hide the top arm");
-                    ui.end_row();
+
                     ui.label("Center dot");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut ch.center_dot, "");
-                        ui.add_enabled(
-                            ch.center_dot,
-                            egui::Slider::new(&mut ch.dot_size, 1..=20).suffix(" px"),
-                        );
+                    ui.checkbox(&mut ch.center_dot, "");
+                    ui.end_row();
+                    ui.add_enabled_ui(ch.center_dot, |ui| {
+                        ui.label("    Dot opacity");
                     });
+                    ui.add_enabled(ch.center_dot, opacity_slider(&mut ch.center_dot_opacity));
                     ui.end_row();
-                    ui.label("Circle radius");
-                    ui.add(egui::Slider::new(&mut ch.circle_radius, 0..=120).suffix(" px"));
-                    ui.end_row();
-                    ui.label("Circle thickness");
+                    ui.add_enabled_ui(ch.center_dot, |ui| {
+                        ui.label("    Dot thickness");
+                    });
                     ui.add_enabled(
-                        ch.circle_radius > 0,
-                        egui::Slider::new(&mut ch.circle_thickness, 1..=20).suffix(" px"),
+                        ch.center_dot,
+                        px_slider(&mut ch.center_dot_thickness, 1..=6),
                     );
-                    ui.end_row();
-                    ui.label("Outline");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(&mut ch.outline, 0..=6).suffix(" px"));
-                        color_edit(ui, &mut ch.outline_color);
-                    });
                     ui.end_row();
                 });
             });
         });
+        for (title, id, lines) in [
+            ("Inner lines", "inner", &mut ch.inner_lines),
+            ("Outer lines", "outer", &mut ch.outer_lines),
+        ] {
+            section(ui, title, |ui| {
+                disabled_note(ui);
+                ui.add_enabled_ui(!uses_image, |ui| lines_editor(ui, id, lines));
+            });
+        }
 
+        // ---- Valorant code -----------------------------------------------
+        section(ui, "Valorant crosshair code", |ui| {
+            ui.label(
+                RichText::new(
+                    "Paste a code from Valorant (Settings > Crosshair > Import) to copy its \
+                     primary crosshair, or copy this crosshair as a code.",
+                )
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.code_input)
+                        .hint_text("0;P;c;5;h;0;0l;4;0o;0;0a;1;0f;0;1b;0")
+                        .desired_width(300.0),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Import").clicked() || enter) && !self.code_input.trim().is_empty() {
+                    let current = self.current().clone();
+                    match crate::valorant::import(&self.code_input, &current) {
+                        Ok(ch) => {
+                            *self.current() = ch;
+                            self.set_status("Imported the Valorant crosshair code", false);
+                        }
+                        Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
+                    }
+                }
+                if ui
+                    .button("Copy code")
+                    .on_hover_text("Copy this crosshair as a Valorant code")
+                    .clicked()
+                {
+                    let code = crate::valorant::export(self.current());
+                    ui.ctx().copy_text(code.clone());
+                    self.code_input = code;
+                    self.set_status("Copied the Valorant code to the clipboard", false);
+                }
+            });
+        });
+
+        let ch = self.current();
         // ---- Common ------------------------------------------------------
         section(ui, "Placement", |ui| {
             grid(ui, "common_grid", |ui| {
@@ -635,19 +829,45 @@ impl Menu {
             ui.label("Start visible");
             ui.checkbox(&mut self.cfg.visible, "");
             ui.end_row();
-            ui.label("Live reload");
-            ui.checkbox(
-                &mut self.cfg.live_reload,
-                "Overlay picks up config edits automatically",
-            );
+            ui.label("Updates");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.cfg.auto_update, "Install automatically")
+                    .on_hover_text(
+                        "When the overlay starts, check GitHub for a new version and install it",
+                    );
+                let busy = matches!(
+                    self.update_state(),
+                    UpdateState::Checking | UpdateState::Installing(_)
+                );
+                if ui
+                    .add_enabled(cfg!(windows) && !busy, egui::Button::new("Check now"))
+                    .clicked()
+                {
+                    self.check_for_update(ui.ctx());
+                }
+                let weak = ui.visuals().weak_text_color();
+                let (text, color) = match self.update_state() {
+                    UpdateState::Idle => (format!("Version {}", updater::CURRENT), weak),
+                    UpdateState::Checking => ("Checking...".into(), weak),
+                    UpdateState::UpToDate => {
+                        (format!("Version {} is the latest", updater::CURRENT), weak)
+                    }
+                    UpdateState::Available(r) | UpdateState::Installing(r) => (
+                        format!("{} available", r.version),
+                        ui.visuals().warn_fg_color,
+                    ),
+                    UpdateState::Installed(r) => (format!("Updated to {}", r.version), weak),
+                    UpdateState::Failed(e) => (e, ui.visuals().error_fg_color),
+                };
+                ui.label(RichText::new(text).color(color));
+            });
             ui.end_row();
             let hk = &mut self.cfg.hotkeys;
             for (label, value) in [
                 ("Show / hide", &mut hk.toggle),
-                ("Open menu", &mut hk.menu),
+                ("Open editor", &mut hk.editor),
                 ("Next crosshair", &mut hk.next),
                 ("Previous crosshair", &mut hk.previous),
-                ("Reload config", &mut hk.reload),
                 ("Quit overlay", &mut hk.quit),
             ] {
                 ui.label(label);
@@ -731,9 +951,9 @@ impl Menu {
         if self.preview.as_ref().is_some_and(|p| p.key == ch) {
             return;
         }
-        let (canvas, error) = match ch.render(&self.base) {
+        let (canvas, error) = match ch.render(&self.dir) {
             Ok(c) => (c, None),
-            Err(e) => (ch.render_or_shapes(&self.base), Some(e)),
+            Err(e) => (ch.render_or_shapes(&self.dir), Some(e)),
         };
         let texture = Some(ctx.load_texture(
             "crosshair-preview",
@@ -847,4 +1067,64 @@ fn color_edit(ui: &mut egui::Ui, c: &mut Color) -> egui::Response {
         *c = Color::rgba(r, g, b, a);
     }
     resp
+}
+
+fn opacity_slider(v: &mut f32) -> egui::Slider<'_> {
+    egui::Slider::new(v, 0.0..=1.0).fixed_decimals(3)
+}
+
+fn px_slider(v: &mut u32, range: std::ops::RangeInclusive<u32>) -> egui::Slider<'_> {
+    egui::Slider::new(v, range).suffix(" px")
+}
+
+/// Controls for one set of lines, laid out like Valorant's menu.
+fn lines_editor(ui: &mut egui::Ui, id: &str, l: &mut Lines) {
+    grid(ui, id, |ui| {
+        ui.label("Show");
+        ui.checkbox(&mut l.show, "");
+        ui.end_row();
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.label("Opacity");
+        });
+        ui.add_enabled(l.show, opacity_slider(&mut l.opacity));
+        ui.end_row();
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.label("Length");
+        });
+        ui.add_enabled(l.show, px_slider(&mut l.length, 0..=40))
+            .on_hover_text("Left and right lines");
+        ui.end_row();
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.label("Vertical length");
+        });
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut l.separate_vertical, "Separate")
+                    .on_hover_text("Set the top and bottom lines' length on its own")
+                    .changed()
+                    && l.separate_vertical
+                {
+                    l.vertical_length = l.length;
+                }
+                if l.separate_vertical {
+                    ui.add(px_slider(&mut l.vertical_length, 0..=40));
+                } else {
+                    ui.label(RichText::new(format!("same as length ({} px)", l.length)).weak());
+                }
+            });
+        });
+        ui.end_row();
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.label("Thickness");
+        });
+        ui.add_enabled(l.show, px_slider(&mut l.thickness, 0..=10));
+        ui.end_row();
+        ui.add_enabled_ui(l.show, |ui| {
+            ui.label("Offset");
+        });
+        ui.add_enabled(l.show, px_slider(&mut l.offset, 0..=40))
+            .on_hover_text("Gap from the centre. At 0 the lines meet in a solid cross.");
+        ui.end_row();
+    });
 }

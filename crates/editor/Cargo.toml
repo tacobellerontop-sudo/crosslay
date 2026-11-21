@@ -1,0 +1,25 @@
+[package]
+name = "crosslay-editor"
+description = "Crosshair designer for the crosslay overlay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crosslay-format.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+png = "0.18"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.0"
+
+[target.'cfg(windows)'.dependencies]
+rfd = "0.17"
+# Updater: Windows TLS (SChannel) keeps the editor free of C crypto builds.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
