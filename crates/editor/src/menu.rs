@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod draw;
+
 /// How long the editor waits after the last change before saving.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
 
@@ -41,8 +43,8 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("crosslay editor {}", updater::CURRENT))
-            .with_inner_size([1100.0, 680.0])
-            .with_min_inner_size([760.0, 500.0])
+            .with_inner_size([1240.0, 780.0])
+            .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -102,6 +104,8 @@ struct Menu {
     code_input: String,
     /// Update check / install, driven by a background thread.
     update: Arc<Mutex<UpdateState>>,
+    /// Tools, undo history and other drawing state.
+    studio: draw::Studio,
 }
 
 #[derive(Clone)]
@@ -141,11 +145,12 @@ impl Menu {
             drag_rest: Vec2::ZERO,
             status,
             preview: None,
-            zoom: 6,
+            zoom: 10,
             background: Background::Scene,
             image_input: String::new(),
             code_input: String::new(),
             update: Arc::new(Mutex::new(UpdateState::Idle)),
+            studio: draw::Studio::default(),
         };
         menu.sync_image_input();
         if menu.cfg.auto_update && cfg!(windows) {
@@ -458,16 +463,17 @@ impl eframe::App for Menu {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("profiles")
             .resizable(false)
-            .exact_size(210.0)
+            .exact_size(190.0)
             .show(ui, |ui| self.profile_list(ui));
-        egui::Panel::right("preview")
+        egui::Panel::right("inspector")
             .resizable(true)
-            .default_size(340.0)
-            .show(ui, |ui| self.preview_panel(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.editor(ui));
-        });
+            .default_size(330.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
+            });
+        egui::CentralPanel::default().show(ui, |ui| self.canvas_area(ui));
 
+        self.shortcuts(&ctx);
         self.drop_hint(&ctx);
         self.autosave(&ctx);
     }
@@ -507,6 +513,7 @@ impl Menu {
     }
 
     fn autosave(&mut self, ctx: &egui::Context) {
+        self.track_history(ctx);
         if self.cfg != self.prev {
             self.prev = self.cfg.clone();
             self.changed_at = Some(Instant::now());
@@ -662,35 +669,8 @@ impl Menu {
         );
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        let ch = self.current();
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut ch.name).desired_width(240.0));
-        });
-        ui.add_space(8.0);
-        self.right_click_bar(ui);
-
-        // ---- Shapes ------------------------------------------------------
-        let uses_image = self.target().uses_image();
-        section(ui, "Shapes", |ui| {
-            if uses_image {
-                ui.label(RichText::new("Hidden while an image is set (see Image below).").weak());
-            }
-            ui.add_enabled_ui(!uses_image, |ui| self.layer_list(ui));
-        });
-        let n = self.target().layers.len();
-        if n > 0 {
-            let i = self.layer.min(n - 1);
-            self.layer = i;
-            let layer = &mut self.target().layers[i];
-            let title = format!("Shape: {}", layer.name);
-            section(ui, &title, |ui| {
-                ui.add_enabled_ui(!uses_image, |ui| layer_editor(ui, layer));
-            });
-        }
-
+    /// Valorant codes, PNG crosshairs and placement on screen.
+    fn more_sections(&mut self, ui: &mut egui::Ui) {
         // ---- Valorant code -----------------------------------------------
         section(ui, "Valorant crosshair code", |ui| {
             ui.label(
@@ -789,7 +769,7 @@ impl Menu {
 
         let ch = self.target();
         // ---- Common ------------------------------------------------------
-        section(ui, "Placement", |ui| {
+        section(ui, "Position on screen", |ui| {
             grid(ui, "common_grid", |ui| {
                 ui.label("Opacity");
                 ui.add(egui::Slider::new(&mut ch.opacity, 0.0..=1.0).fixed_decimals(2));
@@ -816,43 +796,33 @@ impl Menu {
                 ui.end_row();
             });
         });
-
-        // ---- Settings ----------------------------------------------------
-        egui::CollapsingHeader::new(RichText::new("Settings & hotkeys").strong())
-            .default_open(false)
-            .show(ui, |ui| self.settings(ui));
     }
 
     /// Buttons to add shapes, and the list of layers, top first.
     fn layer_list(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Add");
+        ui.menu_button("+ Add shape", |ui| {
             for kind in Kind::ALL {
                 if ui
                     .button(kind.label())
                     .on_hover_text(kind_hint(kind))
                     .clicked()
                 {
-                    let layers = &mut self.target().layers;
-                    let mut layer = Layer::new(kind);
-                    layer.name = unique_layer_name(layers, &layer.name);
-                    // New shapes take the colour of the one below them.
-                    if let Some(top) = layers.last() {
-                        layer.color = top.color;
-                    }
-                    layers.push(layer);
-                    self.layer = layers.len() - 1;
+                    let l = self.new_shape(kind);
+                    self.push_shape(l);
+                    ui.close();
                 }
             }
-        });
-        ui.add_space(6.0);
+        })
+        .response
+        .on_hover_text("Or draw one on the canvas");
+        ui.add_space(4.0);
 
         let sel = self.layer;
         let layers = &mut self.target().layers;
         let n = layers.len();
         if n == 0 {
             ui.label(
-                RichText::new("No shapes yet. Add one above, or import a Valorant code.").weak(),
+                RichText::new("No shapes yet. Draw one on the canvas or pick a starter.").weak(),
             );
             return;
         }
@@ -908,71 +878,6 @@ impl Menu {
             }
         });
         self.layer = sel;
-    }
-
-    /// Turn the right-click crosshair on or off and pick which one to edit.
-    fn right_click_bar(&mut self, ui: &mut egui::Ui) {
-        let has = self.current().right_click.is_some();
-        section(ui, "Right-click crosshair", |ui| {
-            if !has {
-                ui.label(
-                    RichText::new(
-                        "Show a different crosshair while the right mouse button is held, \
-                         e.g. when aiming down sights. Off, the overlay doesn't watch the \
-                         mouse at all.",
-                    )
-                    .weak(),
-                );
-                if ui.button("Add a right-click crosshair").clicked() {
-                    let copy = self.current().right_click_template();
-                    self.current().right_click = Some(Box::new(copy));
-                    self.editing_right_click = true;
-                    self.sync_image_input();
-                }
-                return;
-            }
-            ui.horizontal(|ui| {
-                ui.label("Editing");
-                let mut alt = self.editing_right_click;
-                ui.selectable_value(&mut alt, false, "Normal");
-                ui.selectable_value(&mut alt, true, "Right mouse held");
-                if alt != self.editing_right_click {
-                    self.editing_right_click = alt;
-                    self.sync_image_input();
-                }
-                ui.separator();
-                if ui
-                    .button("Copy from normal")
-                    .on_hover_text("Make the right-click crosshair the same as the normal one")
-                    .clicked()
-                {
-                    let copy = self.current().right_click_template();
-                    self.current().right_click = Some(Box::new(copy));
-                    self.sync_image_input();
-                }
-                if ui.button("Remove").clicked() {
-                    self.current().right_click = None;
-                    self.editing_right_click = false;
-                    self.sync_image_input();
-                }
-            });
-            let how = match self.cfg.right_click {
-                RightClickMode::Hold => "Shown while the right mouse button is held.",
-                RightClickMode::Toggle => "Each right click switches to it and back.",
-            };
-            ui.label(
-                RichText::new(format!(
-                    "{how} Change this under Settings & hotkeys. The settings below \
-                     edit the {} crosshair.",
-                    if self.editing_right_click {
-                        "right-click"
-                    } else {
-                        "normal"
-                    }
-                ))
-                .weak(),
-            );
-        });
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
@@ -1056,117 +961,6 @@ impl Menu {
         });
         ui.label(
             RichText::new("Examples: Ctrl+Alt+X, Shift+F8, Numpad5. Leave empty to disable.")
-                .small()
-                .weak(),
-        );
-    }
-
-    fn preview_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading("Preview");
-        ui.horizontal(|ui| {
-            ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.zoom, 1..=16).suffix("×"));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Background");
-            ui.selectable_value(&mut self.background, Background::Scene, "Scene");
-            ui.selectable_value(&mut self.background, Background::Dark, "Dark");
-            ui.selectable_value(&mut self.background, Background::Light, "Light");
-            ui.selectable_value(&mut self.background, Background::Checker, "Checker");
-        });
-        ui.add_space(6.0);
-
-        self.update_preview(ui.ctx());
-        let side = ui
-            .available_width()
-            .min(ui.available_height() - 30.0)
-            .max(120.0);
-        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        paint_background(&painter, rect, self.background);
-        // 1× = real on-screen size, regardless of the editor's UI scaling.
-        let px = self.zoom as f32 / ui.ctx().pixels_per_point();
-        let center = rect.center();
-
-        let Some(p) = &self.preview else { return };
-        if let Some(tex) = &p.texture {
-            let min = Pos2::new(
-                center.x - (p.anchor.0 as f32 + 0.5) * px,
-                center.y - (p.anchor.1 as f32 + 0.5) * px,
-            );
-            let r =
-                Rect::from_min_size(min, Vec2::new(p.size[0] as f32 * px, p.size[1] as f32 * px));
-            painter.image(
-                tex.id(),
-                r,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        let info = match &p.error {
-            Some(e) => {
-                RichText::new(format!("Image error: {e}")).color(ui.visuals().error_fg_color)
-            }
-            None => RichText::new(format!("{} × {} px", p.size[0], p.size[1])).weak(),
-        };
-
-        // Shapes can be picked and moved in the preview.
-        if !self.target().uses_image() {
-            let to_world = |pos: Pos2| ((pos - center) / px).to_pos2();
-            let under = |layers: &[Layer], at: Pos2| {
-                layers.iter().rposition(|l| {
-                    l.bounds().is_some_and(|b| {
-                        // Half a pixel of slack, so thin shapes can be hit.
-                        at.x >= b.0 - 0.5
-                            && at.x <= b.2 + 0.5
-                            && at.y >= b.1 - 0.5
-                            && at.y <= b.3 + 0.5
-                    })
-                })
-            };
-            let press = resp.interact_pointer_pos().map(to_world);
-            if (resp.clicked() || resp.drag_started())
-                && let Some(at) = press
-            {
-                if let Some(i) = under(&self.target().layers, at) {
-                    self.layer = i;
-                }
-                self.drag_rest = Vec2::ZERO;
-            }
-            let sel = self.layer;
-            if resp.dragged() {
-                self.drag_rest += resp.drag_delta() / px;
-                let step = Vec2::new(self.drag_rest.x.trunc(), self.drag_rest.y.trunc());
-                self.drag_rest -= step;
-                if let Some(l) = self.target().layers.get_mut(sel) {
-                    l.x += step.x;
-                    l.y += step.y;
-                }
-            }
-            if let Some(b) = self.target().layers.get(sel).and_then(Layer::bounds) {
-                let r = Rect::from_min_max(
-                    center + Vec2::new(b.0, b.1) * px,
-                    center + Vec2::new(b.2, b.3) * px,
-                );
-                painter.rect_stroke(
-                    r.expand(2.0),
-                    2.0,
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 170, 0, 160)),
-                    StrokeKind::Outside,
-                );
-            }
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(if resp.dragged() {
-                    egui::CursorIcon::Grabbing
-                } else {
-                    egui::CursorIcon::Grab
-                });
-            }
-        }
-        ui.label(info);
-        ui.label(
-            RichText::new("Click a shape to select it, drag to move it.")
                 .small()
                 .weak(),
         );

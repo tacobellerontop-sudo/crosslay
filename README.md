@@ -70,15 +70,23 @@ program already uses one, the overlay tells you at startup and keeps running wit
 
 - **Profiles:** create, duplicate, delete, rename and reorder crosshairs, then cycle through them
   in game with the hotkeys.
-- **Shapes you build yourself:** a crosshair is a stack of layers. Add a **cross, line,
-  rectangle (or dot), circle, ring, arc or triangle**, then set its size, position, rotation,
-  colour, opacity and outline. Any layer can be **repeated around the centre** (4 copies of one
-  line make a cross) or **mirrored**, and smooth edges can be turned on per layer. Show, hide,
-  reorder, duplicate and delete layers in the list. In the preview, click a shape to select it
-  and drag it to move it a pixel at a time.
+- **Start from a template:** one click on *Classic*, *Cross*, *Gap + dot*, *Dot*, *Circle*,
+  *T*, *Chevron*, *Brackets* or *Blank* gives you a crosshair in your colour to change.
+- **Draw on the canvas:** pick a tool and draw straight onto the zoomed crosshair. *Dot*
+  places a dot where you click. *Line* draws from where you press to where you let go.
+  *Circle* and *Ring* draw from the middle outwards. *Select* picks a shape so you can drag it.
+  Everything snaps to whole pixels.
+- **Symmetry:** with *4-way* (the default) you draw one arm and get all four. *Left-right*
+  mirrors to the other side, and *Off* draws just what you drew.
+- **Simple settings:** the selected shape shows colour, opacity, size, width, outline and
+  symmetry. *More options* has the rest: position, rotation, any number of copies around the
+  centre, mirroring, outline colour and smooth edges. *+ Add shape* also offers crosses, arcs,
+  triangles and rectangles.
+- **Undo and redo** with Ctrl+Z and Ctrl+Y. Delete removes the selected shape, the arrow keys
+  nudge it a pixel, and S, D, L, C and R switch tools.
 - **Right-click crosshair:** give any crosshair a second look to show while the right mouse
-  button is held, for aiming down sights. Click *Add a right-click crosshair*, then switch
-  between *Normal* and *Right mouse held* to edit each one; the preview follows. Under
+  button is held, for aiming down sights. Click *+ Right-click crosshair* above the canvas, then
+  switch between *Normal* and *Right mouse held* to edit each one. Under
   *Settings & hotkeys* you can make each right click toggle it instead, for games with toggle
   aim.
 - **Valorant crosshair codes:** paste a code from Valorant (*Settings > Crosshair > Import
@@ -89,8 +97,8 @@ program already uses one, the overlay tells you at startup and keeps running wit
   firing error are ignored because they don't apply to an overlay.
 - **Your own PNG:** choose a file, type a path, or drop a PNG on the window. It's copied into an
   `images` folder so it keeps working if you move the original.
-- **Live preview** at real size or zoomed in, on game-like, dark, light or checkerboard
-  backgrounds.
+- **Live preview** at real size or zoomed in, with a pixel grid, on game-like, dark, light or
+  checkerboard backgrounds.
 - **Live apply** (on by default) saves each change after a short pause, and the running overlay
   updates straight away. Turn it off to use **Save** and **Revert** yourself.
 - **Start overlay** starts `crosslay.exe` if it isn't running.
