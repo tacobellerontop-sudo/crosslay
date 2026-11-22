@@ -1,6 +1,8 @@
 use crate::color::Color;
-use crate::crosshair::{Crosshair, Lines};
+use crate::crosshair::Crosshair;
 use crate::hotkey::Hotkey;
+use crate::layer::{Kind, Layer};
+use crate::valorant::{Lines, Settings};
 use crosslay_format::{Action, BAKED_FILE, CONFIG_FILE};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -93,42 +95,75 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             crosshairs: vec![
                 Crosshair::default(),
-                Crosshair {
-                    name: "Solid cross".into(),
-                    color: Color::rgb(0, 255, 0),
-                    inner_lines: Lines {
-                        opacity: 1.0,
-                        length: 5,
-                        offset: 0,
-                        ..Lines::INNER
+                Crosshair::from_settings(
+                    "Solid cross",
+                    &Settings {
+                        color: Color::rgb(0, 255, 0),
+                        inner_lines: Lines {
+                            opacity: 1.0,
+                            length: 5,
+                            offset: 0,
+                            ..Lines::INNER
+                        },
+                        outer_lines: Lines::HIDDEN,
+                        ..Default::default()
                     },
-                    outer_lines: Lines::HIDDEN,
-                    ..Default::default()
-                },
-                Crosshair {
-                    name: "Dot".into(),
-                    color: Color::rgb(0, 255, 255),
-                    center_dot: true,
-                    center_dot_thickness: 4,
-                    inner_lines: Lines::HIDDEN,
-                    outer_lines: Lines::HIDDEN,
-                    ..Default::default()
-                },
-                Crosshair {
-                    name: "Wide".into(),
-                    color: Color::rgb(255, 255, 0),
-                    center_dot: true,
-                    inner_lines: Lines {
-                        opacity: 1.0,
-                        length: 10,
-                        separate_vertical: true,
-                        vertical_length: 3,
-                        thickness: 2,
-                        offset: 4,
-                        ..Lines::INNER
+                ),
+                Crosshair::from_settings(
+                    "Dot",
+                    &Settings {
+                        color: Color::rgb(0, 255, 255),
+                        center_dot: true,
+                        center_dot_thickness: 4,
+                        inner_lines: Lines::HIDDEN,
+                        outer_lines: Lines::HIDDEN,
+                        ..Default::default()
                     },
-                    outer_lines: Lines::HIDDEN,
-                    ..Default::default()
+                ),
+                Crosshair::from_settings(
+                    "Wide",
+                    &Settings {
+                        color: Color::rgb(255, 255, 0),
+                        center_dot: true,
+                        inner_lines: Lines {
+                            opacity: 1.0,
+                            length: 10,
+                            separate_vertical: true,
+                            vertical_length: 3,
+                            thickness: 2,
+                            offset: 4,
+                            ..Lines::INNER
+                        },
+                        outer_lines: Lines::HIDDEN,
+                        ..Default::default()
+                    },
+                ),
+                Crosshair {
+                    name: "Circle".into(),
+                    layers: vec![
+                        Layer {
+                            name: "Ring".into(),
+                            width: 21.0,
+                            thickness: 1.5,
+                            ..Layer::new(Kind::Ring)
+                        },
+                        Layer {
+                            name: "Dot".into(),
+                            width: 3.0,
+                            outline: 0.0,
+                            ..Layer::new(Kind::Circle)
+                        },
+                        Layer {
+                            name: "Ticks".into(),
+                            x: 13.5,
+                            width: 4.0,
+                            thickness: 1.0,
+                            copies: 4,
+                            opacity: 0.8,
+                            ..Layer::new(Kind::Line)
+                        },
+                    ],
+                    ..Crosshair::from_settings("Circle", &Settings::default())
                 },
             ],
         }
@@ -312,28 +347,38 @@ pub fn config_text(cfg: &Config) -> String {
 #              right mouse button is held; \"toggle\": each click switches
 # hotkeys      e.g. \"Ctrl+Alt+X\", \"Shift+F8\", \"Numpad5\"; \"\" disables one
 #
-# Each [[crosshair]] is a profile you can cycle through. The settings follow
-# Valorant's crosshair menu. Fields:
-#   color / outline_color   \"#RRGGBB\" or \"#RRGGBBAA\"
-#   outlines                border around every part, with outline_opacity
-#                           (0.0 to 1.0) and outline_thickness (px)
-#   center_dot              square dot, with center_dot_opacity and
-#                           center_dot_thickness (px)
-#   inner_lines / outer_lines
-#       show, opacity       on/off and 0.0 to 1.0
-#       length              left/right line length (px)
-#       separate_vertical   use vertical_length for the top/bottom lines
-#       thickness           line width (px)
-#       offset              gap from the centre (px); 0 = lines meet
-#   image                   PNG file to show instead of the shapes (\"\" = shapes);
+# Each [[crosshair]] is a profile you can cycle through, built from shape
+# layers. Easiest to make in crosslay-editor. Crosshair fields:
+#   name                    shown when cycling crosshairs
+#   image                   PNG file to show instead of the layers (\"\" = layers);
 #                           relative paths are relative to this file's folder
 #   image_scale             scale factor for the image
 #   opacity                 0.0 to 1.0, applies to the whole crosshair
 #   offset_x, offset_y      move the crosshair away from the screen centre
+#   [[crosshair.layer]]     one shape, bottom first. Fields:
+#       shape               cross, line, rect, circle, ring, arc or triangle
+#       visible             false hides the layer
+#       x, y                centre, in pixels from the screen centre (y down)
+#       width               length (cross, line), width (rect, triangle) or
+#                           diameter (circle, ring, arc)
+#       height              vertical line length (cross), height (rect, triangle)
+#       thickness           line width (cross, line, ring, arc)
+#       gap                 space between the centre and the lines (cross)
+#       sweep               degrees of the circle an arc covers
+#       rotation            degrees, clockwise
+#       copies              repeat evenly around the centre (4 = every 90°)
+#       mirror_x, mirror_y  also draw it mirrored left-right / top-bottom
+#       color, opacity      \"#RRGGBB\" or \"#RRGGBBAA\", and 0.0 to 1.0
+#       outline             outline width in pixels (0 = none), with
+#                           outline_color and outline_opacity
+#       smooth              anti-aliased edges (off = sharp pixels)
 #   [crosshair.right_click] optional: a second crosshair with the same fields,
 #                           shown while the right mouse button is held (e.g.
 #                           aiming down sights). Leave it out to keep one
 #                           crosshair; the overlay then ignores the mouse.
+#
+# Crosshairs from crosslay 0.2 (color, inner_lines, ...) are still read and
+# turned into layers.
 
 {body}"
     )
@@ -400,8 +445,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.crosshairs.len(), 1);
-        assert_eq!(cfg.active().color, Color::rgb(255, 0, 0));
-        assert_eq!(cfg.active().inner_lines, Lines::INNER);
+        // A crosslay 0.2 crosshair: Valorant's default lines, in red.
+        let layers = &cfg.active().layers;
+        assert_eq!(layers.len(), 2);
+        assert!(layers.iter().all(|l| l.color == Color::rgb(255, 0, 0)));
+        assert_eq!(layers[1].width, Lines::INNER.length as f32);
         let parsed = cfg.hotkeys.parsed().unwrap();
         assert_eq!(parsed.iter().flatten().count(), 4);
     }
@@ -441,9 +489,7 @@ mod tests {
             ..Config::default()
         };
         let mut aim = cfg.crosshairs[0].right_click_template();
-        aim.center_dot = true;
-        aim.inner_lines = Lines::HIDDEN;
-        aim.outer_lines = Lines::HIDDEN;
+        aim.layers = vec![Layer::new(Kind::Rect)];
         aim.offset_y = 3;
         cfg.crosshairs[0].right_click = Some(Box::new(aim.clone()));
         let text = config_text(&cfg);

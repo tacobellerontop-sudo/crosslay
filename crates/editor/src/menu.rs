@@ -7,11 +7,13 @@
 use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::config::{self, Config, RightClickMode};
-use crate::crosshair::{Crosshair, Lines};
+use crate::crosshair::Crosshair;
+use crate::layer::{Kind, Layer};
 use crate::updater::{self, Release};
 use crosslay_format::CONFIG_FILE;
 use eframe::egui::{
-    self, Color32, ColorImage, Pos2, Rect, RichText, Sense, TextureHandle, TextureOptions, Vec2,
+    self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -87,6 +89,10 @@ struct Menu {
     /// Editing the selected crosshair's right-click crosshair instead of the
     /// crosshair itself (when it has one).
     editing_right_click: bool,
+    /// Index of the layer being edited, in the edited crosshair's layers.
+    layer: usize,
+    /// Preview drag movement not applied yet (under a pixel), in pixels.
+    drag_rest: Vec2,
     status: Status,
     preview: Option<Preview>,
     zoom: u32,
@@ -131,6 +137,8 @@ impl Menu {
             live_apply: true,
             selected,
             editing_right_click: false,
+            layer: 0,
+            drag_rest: Vec2::ZERO,
             status,
             preview: None,
             zoom: 6,
@@ -175,8 +183,13 @@ impl Menu {
         self.sync_image_input();
     }
 
+    /// Call after switching which crosshair is edited: shows its image path
+    /// and selects its top layer.
     fn sync_image_input(&mut self) {
-        self.image_input = self.target().image.clone();
+        let ch = self.target();
+        let (image, top) = (ch.image.clone(), ch.layers.len().saturating_sub(1));
+        self.image_input = image;
+        self.layer = top;
     }
 
     fn set_status(&mut self, text: impl Into<String>, error: bool) {
@@ -659,9 +672,80 @@ impl Menu {
         ui.add_space(8.0);
         self.right_click_bar(ui);
 
+        // ---- Shapes ------------------------------------------------------
+        let uses_image = self.target().uses_image();
+        section(ui, "Shapes", |ui| {
+            if uses_image {
+                ui.label(RichText::new("Hidden while an image is set (see Image below).").weak());
+            }
+            ui.add_enabled_ui(!uses_image, |ui| self.layer_list(ui));
+        });
+        let n = self.target().layers.len();
+        if n > 0 {
+            let i = self.layer.min(n - 1);
+            self.layer = i;
+            let layer = &mut self.target().layers[i];
+            let title = format!("Shape: {}", layer.name);
+            section(ui, &title, |ui| {
+                ui.add_enabled_ui(!uses_image, |ui| layer_editor(ui, layer));
+            });
+        }
+
+        // ---- Valorant code -----------------------------------------------
+        section(ui, "Valorant crosshair code", |ui| {
+            ui.label(
+                RichText::new(
+                    "Paste a code from Valorant (Settings > Crosshair > Import) to turn its \
+                     primary crosshair (its ADS crosshair when editing the right-click \
+                     crosshair) into shapes. This replaces the shapes above.",
+                )
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.code_input)
+                        .hint_text("0;P;c;5;h;0;0l;4;0o;0;0a;1;0f;0;1b;0")
+                        .desired_width(300.0),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Import").clicked() || enter) && !self.code_input.trim().is_empty() {
+                    let section = if self.editing_right_click() {
+                        crate::valorant::Section::Ads
+                    } else {
+                        crate::valorant::Section::Primary
+                    };
+                    match crate::valorant::import(&self.code_input, section) {
+                        Ok(settings) => {
+                            self.target().layers = settings.to_layers();
+                            self.sync_image_input();
+                            self.set_status("Imported the Valorant crosshair code", false);
+                        }
+                        Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
+                    }
+                }
+                let exported = crate::valorant::Settings::from_layers(&self.target().layers);
+                let hint = match &exported {
+                    Ok(_) => "Copy this crosshair as a Valorant code".to_string(),
+                    Err(e) => format!("Valorant can't show this crosshair: {e}"),
+                };
+                if ui
+                    .add_enabled(exported.is_ok(), egui::Button::new("Copy code"))
+                    .on_hover_text(&hint)
+                    .on_disabled_hover_text(&hint)
+                    .clicked()
+                    && let Ok(settings) = exported
+                {
+                    let code = crate::valorant::export(&settings);
+                    ui.ctx().copy_text(code.clone());
+                    self.code_input = code;
+                    self.set_status("Copied the Valorant code to the clipboard", false);
+                }
+            });
+        });
+
         // ---- Image -------------------------------------------------------
         section(ui, "Image", |ui| {
-            ui.label(RichText::new("Use your own PNG instead of the drawn shapes.").weak());
+            ui.label(RichText::new("Use your own PNG instead of the shapes.").weak());
             ui.horizontal(|ui| {
                 if HAS_FILE_DIALOG
                     && ui.button("Choose PNG...").clicked()
@@ -703,116 +787,6 @@ impl Menu {
             }
         });
 
-        let uses_image = self.target().uses_image();
-        let ch = self.target();
-
-        // ---- Shapes (Valorant-style) -------------------------------------
-        let disabled_note = |ui: &mut egui::Ui| {
-            if uses_image {
-                ui.label(RichText::new("Shapes are hidden while an image is set.").weak());
-            }
-        };
-        section(ui, "Crosshair", |ui| {
-            disabled_note(ui);
-            ui.add_enabled_ui(!uses_image, |ui| {
-                grid(ui, "primary_grid", |ui| {
-                    ui.label("Color");
-                    color_edit(ui, &mut ch.color);
-                    ui.end_row();
-
-                    ui.label("Outlines");
-                    ui.checkbox(&mut ch.outlines, "");
-                    ui.end_row();
-                    ui.add_enabled_ui(ch.outlines, |ui| {
-                        ui.label("    Outline opacity");
-                    });
-                    ui.add_enabled(ch.outlines, opacity_slider(&mut ch.outline_opacity));
-                    ui.end_row();
-                    ui.add_enabled_ui(ch.outlines, |ui| {
-                        ui.label("    Outline thickness");
-                    });
-                    ui.add_enabled_ui(ch.outlines, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(px_slider(&mut ch.outline_thickness, 1..=6));
-                            color_edit(ui, &mut ch.outline_color);
-                        });
-                    });
-                    ui.end_row();
-
-                    ui.label("Center dot");
-                    ui.checkbox(&mut ch.center_dot, "");
-                    ui.end_row();
-                    ui.add_enabled_ui(ch.center_dot, |ui| {
-                        ui.label("    Dot opacity");
-                    });
-                    ui.add_enabled(ch.center_dot, opacity_slider(&mut ch.center_dot_opacity));
-                    ui.end_row();
-                    ui.add_enabled_ui(ch.center_dot, |ui| {
-                        ui.label("    Dot thickness");
-                    });
-                    ui.add_enabled(
-                        ch.center_dot,
-                        px_slider(&mut ch.center_dot_thickness, 1..=6),
-                    );
-                    ui.end_row();
-                });
-            });
-        });
-        for (title, id, lines) in [
-            ("Inner lines", "inner", &mut ch.inner_lines),
-            ("Outer lines", "outer", &mut ch.outer_lines),
-        ] {
-            section(ui, title, |ui| {
-                disabled_note(ui);
-                ui.add_enabled_ui(!uses_image, |ui| lines_editor(ui, id, lines));
-            });
-        }
-
-        // ---- Valorant code -----------------------------------------------
-        section(ui, "Valorant crosshair code", |ui| {
-            ui.label(
-                RichText::new(
-                    "Paste a code from Valorant (Settings > Crosshair > Import) to copy its \
-                     primary crosshair (its ADS crosshair when editing the right-click \
-                     crosshair), or copy this crosshair as a code.",
-                )
-                .weak(),
-            );
-            ui.horizontal(|ui| {
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.code_input)
-                        .hint_text("0;P;c;5;h;0;0l;4;0o;0;0a;1;0f;0;1b;0")
-                        .desired_width(300.0),
-                );
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Import").clicked() || enter) && !self.code_input.trim().is_empty() {
-                    let current = self.target().clone();
-                    let section = if self.editing_right_click() {
-                        crate::valorant::Section::Ads
-                    } else {
-                        crate::valorant::Section::Primary
-                    };
-                    match crate::valorant::import(&self.code_input, &current, section) {
-                        Ok(ch) => {
-                            *self.target() = ch;
-                            self.set_status("Imported the Valorant crosshair code", false);
-                        }
-                        Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
-                    }
-                }
-                if ui
-                    .button("Copy code")
-                    .on_hover_text("Copy this crosshair as a Valorant code")
-                    .clicked()
-                {
-                    let code = crate::valorant::export(self.target());
-                    ui.ctx().copy_text(code.clone());
-                    self.code_input = code;
-                    self.set_status("Copied the Valorant code to the clipboard", false);
-                }
-            });
-        });
-
         let ch = self.target();
         // ---- Common ------------------------------------------------------
         section(ui, "Placement", |ui| {
@@ -847,6 +821,93 @@ impl Menu {
         egui::CollapsingHeader::new(RichText::new("Settings & hotkeys").strong())
             .default_open(false)
             .show(ui, |ui| self.settings(ui));
+    }
+
+    /// Buttons to add shapes, and the list of layers, top first.
+    fn layer_list(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Add");
+            for kind in Kind::ALL {
+                if ui
+                    .button(kind.label())
+                    .on_hover_text(kind_hint(kind))
+                    .clicked()
+                {
+                    let layers = &mut self.target().layers;
+                    let mut layer = Layer::new(kind);
+                    layer.name = unique_layer_name(layers, &layer.name);
+                    // New shapes take the colour of the one below them.
+                    if let Some(top) = layers.last() {
+                        layer.color = top.color;
+                    }
+                    layers.push(layer);
+                    self.layer = layers.len() - 1;
+                }
+            }
+        });
+        ui.add_space(6.0);
+
+        let sel = self.layer;
+        let layers = &mut self.target().layers;
+        let n = layers.len();
+        if n == 0 {
+            ui.label(
+                RichText::new("No shapes yet. Add one above, or import a Valorant code.").weak(),
+            );
+            return;
+        }
+        let mut select = None;
+        for i in (0..n).rev() {
+            let l = &mut layers[i];
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut l.visible, "")
+                    .on_hover_text("Show this shape");
+                let mut text =
+                    RichText::new(format!("{}  ({})", l.name, l.shape.label().to_lowercase()));
+                if !l.visible {
+                    text = text.weak();
+                }
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 22.0],
+                        egui::Button::selectable(i == sel, text),
+                    )
+                    .clicked()
+                {
+                    select = Some(i);
+                }
+            });
+        }
+        let mut sel = select.unwrap_or(sel).min(n - 1);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(sel + 1 < n, egui::Button::new("Move up"))
+                .on_hover_text("Draw it above the shape over it")
+                .clicked()
+            {
+                layers.swap(sel, sel + 1);
+                sel += 1;
+            }
+            if ui
+                .add_enabled(sel > 0, egui::Button::new("Move down"))
+                .on_hover_text("Draw it below the shape under it")
+                .clicked()
+            {
+                layers.swap(sel, sel - 1);
+                sel -= 1;
+            }
+            if ui.button("Duplicate").clicked() {
+                let mut copy = layers[sel].clone();
+                copy.name = unique_layer_name(layers, &copy.name);
+                layers.insert(sel + 1, copy);
+                sel += 1;
+            }
+            if ui.button("Delete").clicked() {
+                layers.remove(sel);
+                sel = sel.saturating_sub(1);
+            }
+        });
+        self.layer = sel;
     }
 
     /// Turn the right-click crosshair on or off and pick which one to edit.
@@ -1021,15 +1082,15 @@ impl Menu {
             .available_width()
             .min(ui.available_height() - 30.0)
             .max(120.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         paint_background(&painter, rect, self.background);
+        // 1× = real on-screen size, regardless of the editor's UI scaling.
+        let px = self.zoom as f32 / ui.ctx().pixels_per_point();
+        let center = rect.center();
 
         let Some(p) = &self.preview else { return };
         if let Some(tex) = &p.texture {
-            // 1× = real on-screen size, regardless of the editor's UI scaling.
-            let px = self.zoom as f32 / ui.ctx().pixels_per_point();
-            let center = rect.center();
             let min = Pos2::new(
                 center.x - (p.anchor.0 as f32 + 0.5) * px,
                 center.y - (p.anchor.1 as f32 + 0.5) * px,
@@ -1049,7 +1110,66 @@ impl Menu {
             }
             None => RichText::new(format!("{} × {} px", p.size[0], p.size[1])).weak(),
         };
+
+        // Shapes can be picked and moved in the preview.
+        if !self.target().uses_image() {
+            let to_world = |pos: Pos2| ((pos - center) / px).to_pos2();
+            let under = |layers: &[Layer], at: Pos2| {
+                layers.iter().rposition(|l| {
+                    l.bounds().is_some_and(|b| {
+                        // Half a pixel of slack, so thin shapes can be hit.
+                        at.x >= b.0 - 0.5
+                            && at.x <= b.2 + 0.5
+                            && at.y >= b.1 - 0.5
+                            && at.y <= b.3 + 0.5
+                    })
+                })
+            };
+            let press = resp.interact_pointer_pos().map(to_world);
+            if (resp.clicked() || resp.drag_started())
+                && let Some(at) = press
+            {
+                if let Some(i) = under(&self.target().layers, at) {
+                    self.layer = i;
+                }
+                self.drag_rest = Vec2::ZERO;
+            }
+            let sel = self.layer;
+            if resp.dragged() {
+                self.drag_rest += resp.drag_delta() / px;
+                let step = Vec2::new(self.drag_rest.x.trunc(), self.drag_rest.y.trunc());
+                self.drag_rest -= step;
+                if let Some(l) = self.target().layers.get_mut(sel) {
+                    l.x += step.x;
+                    l.y += step.y;
+                }
+            }
+            if let Some(b) = self.target().layers.get(sel).and_then(Layer::bounds) {
+                let r = Rect::from_min_max(
+                    center + Vec2::new(b.0, b.1) * px,
+                    center + Vec2::new(b.2, b.3) * px,
+                );
+                painter.rect_stroke(
+                    r.expand(2.0),
+                    2.0,
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 170, 0, 160)),
+                    StrokeKind::Outside,
+                );
+            }
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(if resp.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                });
+            }
+        }
         ui.label(info);
+        ui.label(
+            RichText::new("Click a shape to select it, drag to move it.")
+                .small()
+                .weak(),
+        );
     }
 
     fn update_preview(&mut self, ctx: &egui::Context) {
@@ -1179,58 +1299,210 @@ fn opacity_slider(v: &mut f32) -> egui::Slider<'_> {
     egui::Slider::new(v, 0.0..=1.0).fixed_decimals(3)
 }
 
-fn px_slider(v: &mut u32, range: std::ops::RangeInclusive<u32>) -> egui::Slider<'_> {
-    egui::Slider::new(v, range).suffix(" px")
+fn kind_hint(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Cross => "Four lines around a centre, like Valorant's inner and outer lines",
+        Kind::Line => "A single line; rotate it or repeat it around the centre",
+        Kind::Rect => "A rectangle; a small square makes a dot",
+        Kind::Circle => "A filled circle",
+        Kind::Ring => "A circle outline",
+        Kind::Arc => "Part of a ring",
+        Kind::Triangle => "A triangle, pointing up before rotation",
+    }
 }
 
-/// Controls for one set of lines, laid out like Valorant's menu.
-fn lines_editor(ui: &mut egui::Ui, id: &str, l: &mut Lines) {
-    grid(ui, id, |ui| {
-        ui.label("Show");
-        ui.checkbox(&mut l.show, "");
+/// `base`, or `base 2`, `base 3`... whichever no layer uses yet.
+fn unique_layer_name(layers: &[Layer], base: &str) -> String {
+    let base = base
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end();
+    let base = if base.is_empty() { "Shape" } else { base };
+    let taken = |n: &str| layers.iter().any(|l| l.name == n);
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|i| format!("{base} {i}"))
+        .find(|n| !taken(n))
+        .unwrap()
+}
+
+/// A size slider in half pixels. Typing a bigger value than the slider
+/// shows is allowed.
+fn size_slider(v: &mut f32, max: f32) -> egui::Slider<'_> {
+    egui::Slider::new(v, 0.0..=max)
+        .step_by(0.5)
+        .max_decimals(1)
+        .clamping(egui::SliderClamping::Never)
+        .suffix(" px")
+}
+
+/// Controls for one layer.
+fn layer_editor(ui: &mut egui::Ui, l: &mut Layer) {
+    ui.spacing_mut().slider_width = 130.0;
+    grid(ui, "layer_grid", |ui| {
+        ui.label("Name");
+        ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(200.0));
         ui.end_row();
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.label("Opacity");
-        });
-        ui.add_enabled(l.show, opacity_slider(&mut l.opacity));
-        ui.end_row();
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.label("Length");
-        });
-        ui.add_enabled(l.show, px_slider(&mut l.length, 0..=40))
-            .on_hover_text("Left and right lines");
-        ui.end_row();
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.label("Vertical length");
-        });
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut l.separate_vertical, "Separate")
-                    .on_hover_text("Set the top and bottom lines' length on its own")
-                    .changed()
-                    && l.separate_vertical
-                {
-                    l.vertical_length = l.length;
+
+        ui.label("Shape");
+        egui::ComboBox::from_id_salt("layer_shape")
+            .selected_text(l.shape.label())
+            .show_ui(ui, |ui| {
+                for k in Kind::ALL {
+                    ui.selectable_value(&mut l.shape, k, k.label())
+                        .on_hover_text(kind_hint(k));
                 }
-                if l.separate_vertical {
-                    ui.add(px_slider(&mut l.vertical_length, 0..=40));
-                } else {
-                    ui.label(RichText::new(format!("same as length ({} px)", l.length)).weak());
+            });
+        ui.end_row();
+
+        let size = |ui: &mut egui::Ui, label: &str, v: &mut f32, max: f32, hint: &str| {
+            ui.label(label);
+            let r = ui.add(size_slider(v, max));
+            if !hint.is_empty() {
+                r.on_hover_text(hint);
+            }
+            ui.end_row();
+        };
+        match l.shape {
+            Kind::Cross => {
+                size(
+                    ui,
+                    "Horizontal length",
+                    &mut l.width,
+                    40.0,
+                    "Left and right lines",
+                );
+                size(
+                    ui,
+                    "Vertical length",
+                    &mut l.height,
+                    40.0,
+                    "Top and bottom lines",
+                );
+                size(ui, "Thickness", &mut l.thickness, 10.0, "");
+                size(
+                    ui,
+                    "Gap",
+                    &mut l.gap,
+                    40.0,
+                    "Space between the centre and the lines. At 0 they join into a solid cross.",
+                );
+            }
+            Kind::Line => {
+                size(ui, "Length", &mut l.width, 60.0, "");
+                size(ui, "Thickness", &mut l.thickness, 10.0, "");
+            }
+            Kind::Rect | Kind::Triangle => {
+                size(ui, "Width", &mut l.width, 40.0, "");
+                size(ui, "Height", &mut l.height, 40.0, "");
+            }
+            Kind::Circle => size(ui, "Diameter", &mut l.width, 60.0, ""),
+            Kind::Ring | Kind::Arc => {
+                size(
+                    ui,
+                    "Diameter",
+                    &mut l.width,
+                    100.0,
+                    "Outer edge to outer edge",
+                );
+                size(ui, "Thickness", &mut l.thickness, 10.0, "");
+                if l.shape == Kind::Arc {
+                    ui.label("Sweep");
+                    ui.add(
+                        egui::Slider::new(&mut l.sweep, 0.0..=360.0)
+                            .step_by(1.0)
+                            .suffix("°"),
+                    )
+                    .on_hover_text("How much of the circle the arc covers");
+                    ui.end_row();
                 }
+            }
+        }
+
+        ui.label("Position");
+        ui.horizontal(|ui| {
+            for (axis, v) in [("X", &mut l.x), ("Y", &mut l.y)] {
+                ui.label(axis);
+                ui.add(
+                    egui::DragValue::new(v)
+                        .speed(0.25)
+                        .range(-500.0..=500.0)
+                        .max_decimals(1)
+                        .suffix(" px"),
+                );
+            }
+            if ui
+                .button("Center")
+                .on_hover_text("Put it on the screen centre")
+                .clicked()
+            {
+                l.x = 0.0;
+                l.y = 0.0;
+            }
+        })
+        .response
+        .on_hover_text("From the screen centre; Y grows downwards. Drag in the preview too.");
+        ui.end_row();
+
+        if l.shape.rotates() {
+            ui.label("Rotation");
+            ui.add(
+                egui::Slider::new(&mut l.rotation, -180.0..=180.0)
+                    .step_by(1.0)
+                    .clamping(egui::SliderClamping::Never)
+                    .suffix("°"),
+            )
+            .on_hover_text("Clockwise");
+            ui.end_row();
+        }
+
+        ui.label("Repeat");
+        ui.add(egui::Slider::new(&mut l.copies, 1..=crate::layer::MAX_COPIES).suffix("×"))
+            .on_hover_text(
+                "Copies spread evenly around the screen centre: 4 turns one line into a cross",
+            );
+        ui.end_row();
+
+        ui.label("Mirror");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut l.mirror_x, "Left-right")
+                .on_hover_text("Also draw it flipped across the centre, left to right");
+            ui.checkbox(&mut l.mirror_y, "Up-down")
+                .on_hover_text("Also draw it flipped across the centre, top to bottom");
+        });
+        ui.end_row();
+
+        ui.label("Color");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 90.0;
+            color_edit(ui, &mut l.color);
+            ui.add(opacity_slider(&mut l.opacity));
+        });
+        ui.end_row();
+
+        ui.label("Outline");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 90.0;
+            ui.add(
+                egui::Slider::new(&mut l.outline, 0.0..=6.0)
+                    .step_by(0.5)
+                    .max_decimals(1)
+                    .clamping(egui::SliderClamping::Never)
+                    .suffix(" px"),
+            )
+            .on_hover_text("0 = no outline. Outlines sit behind every shape.");
+            ui.add_enabled_ui(l.outline > 0.0, |ui| {
+                color_edit(ui, &mut l.outline_color);
+                ui.add(opacity_slider(&mut l.outline_opacity));
             });
         });
         ui.end_row();
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.label("Thickness");
-        });
-        ui.add_enabled(l.show, px_slider(&mut l.thickness, 0..=10));
-        ui.end_row();
-        ui.add_enabled_ui(l.show, |ui| {
-            ui.label("Offset");
-        });
-        ui.add_enabled(l.show, px_slider(&mut l.offset, 0..=40))
-            .on_hover_text("Gap from the centre. At 0 the lines meet in a solid cross.");
+
+        ui.label("Smooth edges");
+        ui.checkbox(&mut l.smooth, "").on_hover_text(
+            "Anti-aliasing. Off keeps every pixel sharp, which suits straight lines.",
+        );
         ui.end_row();
     });
 }

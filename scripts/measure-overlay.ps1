@@ -93,18 +93,48 @@ quit = ""
 
 [[crosshair]]
 name = "Measured"
+
+# Several shapes, smooth edges and repeats: the overlay only ever sees the
+# baked pixels, so none of this should change what it costs.
+[[crosshair.layer]]
+shape = "cross"
+width = 6.0
+height = 6.0
+thickness = 2.0
+gap = 3.0
+
+[[crosshair.layer]]
+shape = "ring"
+width = 31.0
+thickness = 1.5
+smooth = true
+
+[[crosshair.layer]]
+shape = "arc"
+width = 41.0
+thickness = 2.0
+sweep = 60.0
+rotation = 45.0
+copies = 4
+smooth = true
+
+[[crosshair.layer]]
+shape = "triangle"
+y = 26.0
+width = 6.0
+height = 5.0
+copies = 3
+smooth = true
 "@
 $rightClick = @"
 
 [crosshair.right_click]
-center_dot = true
-center_dot_thickness = 3
+name = "Aiming"
 
-[crosshair.right_click.inner_lines]
-show = false
-
-[crosshair.right_click.outer_lines]
-show = false
+[[crosshair.right_click.layer]]
+shape = "rect"
+width = 3.0
+height = 3.0
 "@
 
 function Bake([string] $text) {

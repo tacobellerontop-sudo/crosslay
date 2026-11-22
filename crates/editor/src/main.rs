@@ -14,6 +14,7 @@ mod config;
 mod crosshair;
 mod hotkey;
 mod image;
+mod layer;
 mod menu;
 mod png;
 mod updater;
