@@ -1,56 +1,34 @@
-//! Crosshair description and a CPU rasteriser that turns it into a [`Canvas`].
+//! A crosshair: a stack of shape layers (or a PNG), its placement and its
+//! optional right-click crosshair.
 //!
 //! This runs in the editor only. The pixels it produces are baked into
 //! `overlay.bin`, so the overlay never rasterises anything itself.
-//!
-//! The shape settings follow Valorant's crosshair menu: one colour, optional
-//! outlines and centre dot, and two sets of lines (inner and outer), each with
-//! its own opacity, length, thickness and offset. A line set's vertical length
-//! can be set separately from its horizontal length. Alternatively a PNG can
-//! be used instead of the shapes.
 
 use crate::canvas::Canvas;
 use crate::color::Color;
+use crate::layer::Layer;
+use crate::valorant::{Lines, Settings};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(from = "CrosshairFile")]
 pub struct Crosshair {
     /// Display name, used when cycling profiles.
     pub name: String,
-    /// Colour of the lines and the centre dot.
-    pub color: Color,
-
-    /// Draw a border around every part.
-    pub outlines: bool,
-    pub outline_opacity: f32,
-    /// Border width in pixels.
-    pub outline_thickness: u32,
-    pub outline_color: Color,
-
-    pub center_dot: bool,
-    pub center_dot_opacity: f32,
-    /// Side length of the square dot in pixels.
-    pub center_dot_thickness: u32,
-
-    /// The lines nearest the centre.
-    pub inner_lines: Lines,
-    /// A second set of lines, usually further out and fainter.
-    pub outer_lines: Lines,
-
-    /// PNG file to use instead of the shapes above ("" = draw shapes).
+    /// PNG file to use instead of the layers ("" = draw the layers).
     /// Relative paths are resolved against the config file's folder.
     pub image: String,
     /// Scale factor for `image` (nearest-neighbour, keeps pixel art crisp).
     pub image_scale: f32,
-    /// Opacity of the whole crosshair, 0.0 to 1.0, on top of the per-part
-    /// opacities.
+    /// Opacity of the whole crosshair, 0.0 to 1.0, on top of each layer's.
     pub opacity: f32,
     /// Shift the crosshair away from the screen centre, in pixels.
     pub offset_x: i32,
     pub offset_y: i32,
-
+    /// The shapes, bottom first.
+    #[serde(rename = "layer")]
+    pub layers: Vec<Layer>,
     /// A different crosshair to show while the right mouse button is held
     /// (or toggled, see `right_click` in the config), for aiming down sights.
     /// `None` keeps this one; the overlay then doesn't watch the mouse at all.
@@ -58,103 +36,111 @@ pub struct Crosshair {
     pub right_click: Option<Box<Crosshair>>,
 }
 
-/// One set of four lines around the centre.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// What a `[[crosshair]]` may contain: crosslay 0.3's layers, or crosslay
+/// 0.1/0.2's Valorant-style fields, which are turned into layers.
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Lines {
-    pub show: bool,
-    pub opacity: f32,
-    /// Length of the left and right lines in pixels.
-    pub length: u32,
-    /// Set the vertical length separately from `length`.
-    pub separate_vertical: bool,
-    /// Length of the top and bottom lines when `separate_vertical` is on.
-    pub vertical_length: u32,
-    /// Line width in pixels (0 hides the lines).
-    pub thickness: u32,
-    /// Distance in pixels from the centre to where each line starts. At 0 the
-    /// lines meet and form one solid cross.
-    pub offset: u32,
+struct CrosshairFile {
+    name: String,
+    image: String,
+    image_scale: f32,
+    opacity: f32,
+    offset_x: i32,
+    offset_y: i32,
+    layer: Option<Vec<Layer>>,
+    right_click: Option<Box<Crosshair>>,
+    // crosslay 0.2
+    color: Option<Color>,
+    outlines: Option<bool>,
+    outline_opacity: Option<f32>,
+    outline_thickness: Option<u32>,
+    outline_color: Option<Color>,
+    center_dot: Option<bool>,
+    center_dot_opacity: Option<f32>,
+    center_dot_thickness: Option<u32>,
+    inner_lines: Option<Lines>,
+    outer_lines: Option<Lines>,
 }
 
-impl Lines {
-    pub const INNER: Lines = Lines {
-        show: true,
-        opacity: 0.8,
-        length: 6,
-        separate_vertical: false,
-        vertical_length: 6,
-        thickness: 2,
-        offset: 3,
-    };
-
-    pub const OUTER: Lines = Lines {
-        show: true,
-        opacity: 0.35,
-        length: 2,
-        separate_vertical: false,
-        vertical_length: 2,
-        thickness: 2,
-        offset: 10,
-    };
-
-    pub const HIDDEN: Lines = Lines {
-        show: false,
-        ..Lines::OUTER
-    };
-
-    /// Effective vertical length.
-    pub fn vertical(&self) -> u32 {
-        if self.separate_vertical {
-            self.vertical_length
-        } else {
-            self.length
+impl Default for CrosshairFile {
+    fn default() -> Self {
+        let d = Crosshair::default();
+        CrosshairFile {
+            name: d.name,
+            image: d.image,
+            image_scale: d.image_scale,
+            opacity: d.opacity,
+            offset_x: d.offset_x,
+            offset_y: d.offset_y,
+            layer: None,
+            right_click: None,
+            color: None,
+            outlines: None,
+            outline_opacity: None,
+            outline_thickness: None,
+            outline_color: None,
+            center_dot: None,
+            center_dot_opacity: None,
+            center_dot_thickness: None,
+            inner_lines: None,
+            outer_lines: None,
         }
     }
-
-    fn visible(&self) -> bool {
-        self.show && self.thickness > 0 && self.opacity > 0.0
-    }
 }
 
-impl Default for Lines {
-    fn default() -> Self {
-        Lines::INNER
+impl From<CrosshairFile> for Crosshair {
+    fn from(f: CrosshairFile) -> Self {
+        let layers = f.layer.unwrap_or_else(|| {
+            let d = Settings::default();
+            Settings {
+                color: f.color.unwrap_or(d.color),
+                outlines: f.outlines.unwrap_or(d.outlines),
+                outline_opacity: f.outline_opacity.unwrap_or(d.outline_opacity),
+                outline_thickness: f.outline_thickness.unwrap_or(d.outline_thickness),
+                outline_color: f.outline_color.unwrap_or(d.outline_color),
+                center_dot: f.center_dot.unwrap_or(d.center_dot),
+                center_dot_opacity: f.center_dot_opacity.unwrap_or(d.center_dot_opacity),
+                center_dot_thickness: f.center_dot_thickness.unwrap_or(d.center_dot_thickness),
+                inner_lines: f.inner_lines.unwrap_or(d.inner_lines),
+                outer_lines: f.outer_lines.unwrap_or(d.outer_lines),
+            }
+            .to_layers()
+        });
+        Crosshair {
+            name: f.name,
+            image: f.image,
+            image_scale: f.image_scale,
+            opacity: f.opacity,
+            offset_x: f.offset_x,
+            offset_y: f.offset_y,
+            layers,
+            right_click: f.right_click,
+        }
     }
 }
 
 impl Default for Crosshair {
     /// Valorant's default crosshair.
     fn default() -> Self {
-        Self {
-            name: "Default".into(),
-            color: Color::rgb(255, 255, 255),
-            outlines: true,
-            outline_opacity: 0.5,
-            outline_thickness: 1,
-            outline_color: Color::rgb(0, 0, 0),
-            center_dot: false,
-            center_dot_opacity: 1.0,
-            center_dot_thickness: 2,
-            inner_lines: Lines::INNER,
-            outer_lines: Lines::OUTER,
+        Self::from_settings("Default", &Settings::default())
+    }
+}
+
+impl Crosshair {
+    /// A crosshair drawn like Valorant would draw `settings`.
+    pub fn from_settings(name: &str, settings: &Settings) -> Self {
+        Crosshair {
+            name: name.into(),
             image: String::new(),
             image_scale: 1.0,
             opacity: 1.0,
             offset_x: 0,
             offset_y: 0,
+            layers: settings.to_layers(),
             right_click: None,
         }
     }
-}
 
-/// Upper bounds for sizes, so a typo in the config (e.g. `length = 100000`)
-/// can't allocate gigabytes. The baked frame stays well under 4096 px.
-const MAX_LEN: u32 = 500;
-const MAX_THICKNESS: u32 = 64;
-const MAX_OUTLINE: u32 = 16;
-
-impl Crosshair {
     /// A copy of this crosshair to start its right-click crosshair from.
     pub fn right_click_template(&self) -> Crosshair {
         Crosshair {
@@ -201,237 +187,26 @@ impl Crosshair {
         })
     }
 
-    /// Render the shape-based crosshair, ignoring `image` and `opacity`.
+    /// Render the layers, ignoring `image` and `opacity`.
     pub fn render_shapes(&self) -> Canvas {
-        let outline = if self.outlines {
-            self.outline_thickness.min(MAX_OUTLINE) as i32
-        } else {
-            0
-        };
-        let dot = self.center_dot_thickness.clamp(1, MAX_THICKNESS) as i32;
-        let extent = |l: &Lines| {
-            if !l.visible() {
-                return 0;
-            }
-            let reach = l.length.max(l.vertical()).min(MAX_LEN) + l.offset.min(MAX_LEN);
-            (l.thickness.min(MAX_THICKNESS) / 2 + 1 + reach) as i32
-        };
-        let dot_extent = if self.center_dot { dot / 2 + 1 } else { 0 };
-        // Half-size of the canvas around the anchor pixel.
-        let r = extent(&self.inner_lines)
-            .max(extent(&self.outer_lines))
-            .max(dot_extent)
-            .max(1)
-            + outline
-            + 1;
-        let size = (2 * r + 1) as usize;
-
-        // Per pixel: fill opacity (0 = empty). Parts are the same colour, so
-        // where they overlap the most opaque one wins.
-        let mut fill = vec![0f32; size * size];
-        let mut rect = |x0: i32, y0: i32, x1: i32, y1: i32, a: f32| {
-            for y in y0.max(0)..y1.min(size as i32) {
-                for x in x0.max(0)..x1.min(size as i32) {
-                    let px = &mut fill[y as usize * size + x as usize];
-                    *px = px.max(a);
-                }
-            }
-        };
-
-        for lines in [&self.outer_lines, &self.inner_lines] {
-            if !lines.visible() {
-                continue;
-            }
-            let a = lines.opacity.clamp(0.0, 1.0);
-            let t = lines.thickness.min(MAX_THICKNESS) as i32;
-            let off = lines.offset.min(MAX_LEN) as i32;
-            let h = lines.length.min(MAX_LEN) as i32;
-            let v = lines.vertical().min(MAX_LEN) as i32;
-            // The `t`-wide block the lines line up on. The anchor pixel is
-            // inside it: odd thickness is exactly centred, even thickness puts
-            // the extra pixel top/left.
-            let lo = r - t / 2;
-            let hi = lo + t;
-            if h > 0 {
-                rect(lo - off - h, lo, lo - off, hi, a); // left
-                rect(hi + off, lo, hi + off + h, hi, a); // right
-            }
-            if v > 0 {
-                rect(lo, lo - off - v, hi, lo - off, a); // top
-                rect(lo, hi + off, hi, hi + off + v, a); // bottom
-            }
-            // With no offset the lines meet: fill the middle so the cross is
-            // solid instead of having a hole in it.
-            if off == 0 && (h > 0 || v > 0) {
-                rect(lo, lo, hi, hi, a);
-            }
-        }
-        if self.center_dot {
-            let d0 = r - dot / 2;
-            rect(
-                d0,
-                d0,
-                d0 + dot,
-                d0 + dot,
-                self.center_dot_opacity.clamp(0.0, 1.0),
-            );
-        }
-
-        // Outline = everything drawn, grown by `outline` pixels (square
-        // kernel, done separably), minus the parts themselves.
-        let border = if outline > 0 {
-            let solid: Vec<f32> = fill.iter().map(|&a| (a > 0.0) as u8 as f32).collect();
-            dilate(&solid, size, outline as usize)
-        } else {
-            vec![0.0; size * size]
-        };
-
-        let mut canvas = Canvas::new(size as u32, size as u32, (r, r));
-        let fc = premul(self.color);
-        let oc = premul(self.outline_color);
-        let oa = self.outline_opacity.clamp(0.0, 1.0);
-        for (i, px) in canvas.pixels.iter_mut().enumerate() {
-            let out = if fill[i] > 0.0 {
-                fc.map(|c| c * fill[i])
-            } else {
-                oc.map(|c| c * border[i] * oa)
-            };
-            let q = |v: f32| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u32;
-            *px = q(out[3]) << 24 | q(out[0]) << 16 | q(out[1]) << 8 | q(out[2]);
-        }
-        canvas
+        crate::layer::render(&self.layers)
     }
-}
-
-fn premul(c: Color) -> [f32; 4] {
-    let a = c.a as f32 / 255.0;
-    [
-        c.r as f32 / 255.0 * a,
-        c.g as f32 / 255.0 * a,
-        c.b as f32 / 255.0 * a,
-        a,
-    ]
-}
-
-fn dilate(src: &[f32], size: usize, radius: usize) -> Vec<f32> {
-    let mut tmp = vec![0f32; size * size];
-    let mut out = vec![0f32; size * size];
-    for y in 0..size {
-        for x in 0..size {
-            let (a, b) = (x.saturating_sub(radius), (x + radius).min(size - 1));
-            tmp[y * size + x] = src[y * size + a..=y * size + b]
-                .iter()
-                .copied()
-                .fold(0.0, f32::max);
-        }
-    }
-    for y in 0..size {
-        for x in 0..size {
-            let (a, b) = (y.saturating_sub(radius), (y + radius).min(size - 1));
-            out[y * size + x] = (a..=b).map(|yy| tmp[yy * size + x]).fold(0.0, f32::max);
-        }
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layer::Kind;
 
     fn alpha(c: &Canvas, x: i32, y: i32) -> u32 {
         c.pixels[(y as u32 * c.width + x as u32) as usize] >> 24
     }
 
-    /// Solid, outline-free inner lines only.
-    fn plain(inner: Lines) -> Crosshair {
-        Crosshair {
-            outlines: false,
-            inner_lines: Lines {
-                opacity: 1.0,
-                ..inner
-            },
-            outer_lines: Lines::HIDDEN,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn lines_are_symmetric() {
-        let c = plain(Lines {
-            thickness: 1,
-            ..Lines::INNER
-        })
-        .render_shapes();
-        let (ax, ay) = c.anchor;
-        // Offset 3 around the 1 px centre, then 6 px lines.
-        assert_eq!(alpha(&c, ax, ay), 0);
-        assert_eq!(alpha(&c, ax, ay - 3), 0);
-        assert_eq!(alpha(&c, ax, ay - 4), 255);
-        assert_eq!(alpha(&c, ax + 4, ay), 255);
-        assert_eq!(alpha(&c, ax + 9, ay), 255);
-        assert_eq!(alpha(&c, ax + 10, ay), 0);
-        for y in 0..c.height as i32 {
-            for x in 0..c.width as i32 {
-                assert_eq!(alpha(&c, x, y), alpha(&c, 2 * ax - x, y));
-                assert_eq!(alpha(&c, x, y), alpha(&c, x, 2 * ay - y));
-            }
-        }
-    }
-
-    #[test]
-    fn zero_offset_has_no_hole() {
-        for thickness in 1..=4 {
-            let c = plain(Lines {
-                thickness,
-                offset: 0,
-                ..Lines::INNER
-            })
-            .render_shapes();
-            let (ax, ay) = c.anchor;
-            // A continuous line through the centre in both directions.
-            for d in -6..=6 {
-                assert_eq!(alpha(&c, ax + d, ay), 255, "t={thickness} x {d}");
-                assert_eq!(alpha(&c, ax, ay + d), 255, "t={thickness} y {d}");
-            }
-        }
-    }
-
-    #[test]
-    fn vertical_length_is_separate() {
-        let c = plain(Lines {
-            thickness: 1,
-            offset: 0,
-            length: 3,
-            separate_vertical: true,
-            vertical_length: 8,
-            ..Lines::INNER
-        })
-        .render_shapes();
-        let (ax, ay) = c.anchor;
-        assert_eq!(alpha(&c, ax + 3, ay), 255);
-        assert_eq!(alpha(&c, ax + 4, ay), 0);
-        assert_eq!(alpha(&c, ax, ay + 8), 255);
-        assert_eq!(alpha(&c, ax, ay - 8), 255);
-        assert_eq!(alpha(&c, ax, ay + 9), 0);
-    }
-
-    #[test]
-    fn vertical_length_zero_hides_vertical_lines() {
-        let c = plain(Lines {
-            thickness: 1,
-            separate_vertical: true,
-            vertical_length: 0,
-            ..Lines::INNER
-        })
-        .render_shapes();
-        let (ax, ay) = c.anchor;
-        assert_eq!(alpha(&c, ax + 5, ay), 255);
-        assert!((0..c.height as i32).all(|y| alpha(&c, ax, y) == 0));
-    }
-
     #[test]
     fn default_has_inner_and_faint_outer_lines() {
         let ch = Crosshair::default();
+        let kinds: Vec<_> = ch.layers.iter().map(|l| l.shape).collect();
+        assert_eq!(kinds, [Kind::Cross, Kind::Cross]);
         let c = ch.render_shapes();
         let (ax, ay) = c.anchor;
         // Inner line at 80 %, outer at 35 %, outline at 50 % black.
@@ -442,34 +217,56 @@ mod tests {
     }
 
     #[test]
-    fn outline_surrounds_dot() {
-        let c = Crosshair {
+    fn reads_crosslay_0_2_crosshairs() {
+        let old: Crosshair = toml::from_str(
+            r##"
+            name = "Old"
+            color = "#00FF00"
+            center_dot = true
+            outlines = false
+            [inner_lines]
+            length = 4
+            offset = 0
+            [outer_lines]
+            show = false
+            "##,
+        )
+        .unwrap();
+        let s = Settings {
+            color: Color::rgb(0, 255, 0),
             center_dot: true,
-            center_dot_thickness: 1,
-            outline_opacity: 1.0,
-            inner_lines: Lines::HIDDEN,
+            outlines: false,
+            inner_lines: Lines {
+                length: 4,
+                vertical_length: 4,
+                offset: 0,
+                ..Lines::INNER
+            },
             outer_lines: Lines::HIDDEN,
-            ..Default::default()
-        }
-        .render_shapes();
-        let (ax, ay) = c.anchor;
-        let px = |x, y| c.pixels[(y as u32 * c.width + x as u32) as usize];
-        assert_eq!(px(ax, ay), 0xFFFFFFFF);
-        assert_eq!(px(ax + 1, ay + 1), 0xFF000000);
-        assert_eq!(px(ax + 2, ay), 0);
+            ..Settings::default()
+        };
+        assert_eq!(old.name, "Old");
+        assert_eq!(old.layers, s.to_layers());
+        // A bare [[crosshair]] is Valorant's default.
+        let bare: Crosshair = toml::from_str("name = \"Default\"").unwrap();
+        assert_eq!(bare, Crosshair::default());
     }
 
     #[test]
-    fn huge_values_are_clamped() {
-        let c = plain(Lines {
-            length: u32::MAX,
-            vertical_length: u32::MAX,
-            separate_vertical: true,
-            offset: u32::MAX,
-            thickness: u32::MAX,
-            ..Lines::INNER
-        })
-        .render_shapes();
-        assert!(c.width < crosslay_format::MAX_SIDE as u32);
+    fn layers_round_trip_through_toml() {
+        let mut ch = Crosshair::default();
+        ch.layers.push(crate::layer::Layer {
+            rotation: 45.0,
+            copies: 3,
+            mirror_x: true,
+            ..crate::layer::Layer::new(Kind::Triangle)
+        });
+        ch.right_click = Some(Box::new(Crosshair {
+            layers: vec![],
+            ..Crosshair::default()
+        }));
+        let text = toml::to_string(&ch).unwrap();
+        let back: Crosshair = toml::from_str(&text).unwrap();
+        assert_eq!(back, ch, "{text}");
     }
 }

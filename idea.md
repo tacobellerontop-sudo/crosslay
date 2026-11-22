@@ -73,9 +73,13 @@ folder is used (portable mode). Otherwise it's `%APPDATA%\crosslay`.
 ### The editor (`crosslay-editor.exe`)
 
 - An egui app with live preview at real size or zoomed, on several backgrounds.
-- Valorant-style crosshairs: colour, outlines, centre dot, and inner and outer lines with their
-  own opacity, length (optionally a separate vertical length), thickness and offset. Valorant
-  crosshair codes can be imported and exported. PNG crosshairs work too. PNGs are copied into `images/` so they keep working if the
+- Crosshairs are stacks of shape layers (cross, line, rectangle, circle, ring, arc,
+  triangle), each with its own size, position, rotation, colour, opacity, outline, repeat
+  around the centre and mirroring. The editor rasterises them on the CPU and bakes the result,
+  so a crosshair with twenty shapes costs the overlay exactly what a dot does. Valorant
+  crosshair codes are imported by turning them into cross and dot layers that draw the same
+  pixels as the game, and crosshairs made only of such layers export back to a code. PNG
+  crosshairs work too. PNGs are copied into `images/` so they keep working if the
   original moves.
 - Several profiles, which you can reorder, plus settings for the monitor and the hotkeys
   (validated before saving).
