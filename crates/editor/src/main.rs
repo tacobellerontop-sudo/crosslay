@@ -17,6 +17,7 @@ mod image;
 mod layer;
 mod menu;
 mod png;
+mod templates;
 mod updater;
 mod valorant;
 #[cfg(windows)]
