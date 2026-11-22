@@ -108,8 +108,10 @@ may run while nothing happens, and nothing in the overlay may slow the game down
   every mouse report waits for the hook to return, and a busy hook adds latency to the game's
   aim. Raw input (`RegisterRawInputDevices` with `RIDEV_INPUTSINK`) is posted to the overlay's
   queue after the fact, so it can't delay anything. Neither API can deliver button presses
-  alone, so each mouse report wakes the overlay briefly; it reads the button flags and goes
-  back to sleep. CI measures the cost per report.
+  alone, so a moving mouse keeps waking the overlay. To keep that down, after reading input the
+  overlay waits 4 ms on a high-resolution waitable timer before it looks at its queue again,
+  then reads everything that piled up. A 1000 to 8000 Hz mouse costs at most 250 wake-ups a
+  second, and a swap is at most 4 ms late. CI measures the cost per mouse report.
 - **Opt-in by construction.** Raw input is registered only while the shown profile has a
   right-click crosshair and the overlay is visible, and removed otherwise. A setup without one
   never hears from the mouse.

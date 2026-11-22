@@ -192,9 +192,9 @@ show = false
 ### Right-click crosshair and resource use
 
 A crosshair without a right-click crosshair costs exactly what it did before: the overlay doesn't
-listen to the mouse at all. With one, Windows wakes the overlay for each mouse report (there's no
-way to ask for button presses only). Each wake-up reads the report, sees no button change and
-goes back to sleep. The CI run measures this cost; see *Measure* below. If a game runs as
+listen to the mouse at all. With one, Windows sends the overlay every mouse report (there's no
+way to ask for button presses only). The overlay reads them in batches at most every 4 ms, checks
+for a right-button change and goes back to sleep, so the swap is at most 4 ms late. The CI run measures this cost; see *Measure* below. If a game runs as
 administrator, run `crosslay.exe` as administrator too, or Windows won't pass it that game's
 mouse input.
 

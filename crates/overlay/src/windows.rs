@@ -47,7 +47,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, INFINITE, SetProcessWorkingSetSize,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateMutexW, CreateWaitableTimerExW, GetCurrentProcess,
+    INFINITE, SetProcessWorkingSetSize, SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows_sys::Win32::UI::HiDpi::{
@@ -84,6 +85,11 @@ const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
 const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
 /// `WM_INPUT`'s wParam when the input arrived while we were in the foreground.
 const RIM_INPUT: usize = 0;
+/// After handling mouse input, wait this long (in 100 ns units) before
+/// looking at the queue again, so a moving mouse wakes the overlay at most
+/// every 4 ms instead of for every report (1000 to 8000 a second). A button
+/// press is handled when it's read, so a swap is at most this much late.
+const MOUSE_SETTLE: i64 = 40_000;
 /// A transparent pixel, to free the right-click window's image when the
 /// shown profile has none.
 const EMPTY: Frame<'static> = Frame {
@@ -274,6 +280,16 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
             );
         }
 
+        // High-resolution, so the settle wait is ~4 ms without raising the
+        // system timer resolution. Without it (before Windows 10 1803) every
+        // report is handled as it comes.
+        let settle = CreateWaitableTimerExW(
+            null(),
+            null(),
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS,
+        );
+
         let mut msg: MSG = std::mem::zeroed();
         loop {
             let r = MsgWaitForMultipleObjects(watching as u32, &watch, 0, INFINITE, QS_ALLINPUT);
@@ -282,6 +298,7 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                 app.file_changed();
                 continue;
             }
+            let mut mouse_input = false;
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 match msg.message {
                     WM_QUIT => return Ok(()),
@@ -294,6 +311,7 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                         None => {}
                     },
                     WM_INPUT => {
+                        mouse_input = true;
                         app.mouse_buttons(right_button(msg.lParam));
                         // Windows wants this for input that arrived while we
                         // had the focus (we never do, but be correct).
@@ -309,6 +327,13 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                     _ => {
                         DispatchMessageW(&msg);
                     }
+                }
+            }
+            // Let the next few mouse reports pile up and read them in one go.
+            if mouse_input && !settle.is_null() {
+                let due = -MOUSE_SETTLE; // negative = relative
+                if SetWaitableTimer(settle, &due, 0, None, null(), 0) != 0 {
+                    WaitForSingleObject(settle, INFINITE);
                 }
             }
         }
