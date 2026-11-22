@@ -3,7 +3,8 @@ name: CI
 # One pipeline for everything:
 #   test     fmt, clippy and tests on Linux and Windows
 #   build    release exes for Windows x64 and ARM64 (download from the run's Artifacts)
-#   measure  runs the x64 overlay idle for 20 s and reports its cost in the run summary
+#   measure  runs the x64 overlay idle and under synthetic mouse input, checks the
+#            right-click crosshair swaps, and reports the cost in the run summary
 #   release  publishes a GitHub Release with zips and the bare exes the in-app
 #            updater downloads. Runs for a pushed v* tag, or when started by hand
 #            with "Publish a release" ticked (it then creates the v<version> tag
@@ -102,7 +103,7 @@ jobs:
           if-no-files-found: error
 
   measure:
-    name: Measure idle overlay
+    name: Measure overlay
     needs: build
     runs-on: windows-latest
     steps:

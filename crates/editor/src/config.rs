@@ -17,9 +17,22 @@ pub struct Config {
     /// Check GitHub for a new version each time the overlay starts, and
     /// install it.
     pub auto_update: bool,
+    /// How the right mouse button switches to a crosshair's `right_click`
+    /// crosshair.
+    pub right_click: RightClickMode,
     pub hotkeys: Hotkeys,
     #[serde(rename = "crosshair")]
     pub crosshairs: Vec<Crosshair>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RightClickMode {
+    /// Show it while the button is held.
+    #[default]
+    Hold,
+    /// Each press switches between the two.
+    Toggle,
 }
 
 /// Global hotkeys. Use an empty string to disable one.
@@ -76,6 +89,7 @@ impl Default for Config {
             profile: 0,
             visible: true,
             auto_update: true,
+            right_click: RightClickMode::Hold,
             hotkeys: Hotkeys::default(),
             crosshairs: vec![
                 Crosshair::default(),
@@ -140,6 +154,16 @@ impl Config {
                 crosslay_format::MAX_FRAMES
             ));
         }
+        if let Some(ch) = self.crosshairs.iter().find(|c| {
+            c.right_click
+                .as_ref()
+                .is_some_and(|rc| rc.right_click.is_some())
+        }) {
+            return Err(format!(
+                "crosshair {:?}: a right_click crosshair can't have its own right_click",
+                ch.name
+            ));
+        }
         self.hotkeys.parsed()?;
         Ok(())
     }
@@ -195,17 +219,13 @@ impl Config {
             monitor: self.monitor.min(u16::MAX as usize) as u16,
             profile: (self.profile % self.crosshairs.len()) as u16,
             hotkeys,
+            right_click: match self.right_click {
+                RightClickMode::Hold => crosslay_format::RightClick::Hold,
+                RightClickMode::Toggle => crosslay_format::RightClick::Toggle,
+            },
         };
-        let rendered: Vec<_> = self
-            .crosshairs
-            .iter()
-            .map(|ch| {
-                let canvas = ch.render_or_shapes(dir);
-                (ch, canvas.to_bgra_bytes(), canvas)
-            })
-            .collect();
-        let mut frames = Vec::with_capacity(rendered.len());
-        for (ch, bytes, canvas) in &rendered {
+        let render = |ch: &Crosshair| -> Result<Baked, String> {
+            let canvas = ch.render_or_shapes(dir);
             let side = crosslay_format::MAX_SIDE as u32;
             if canvas.width > side || canvas.height > side {
                 return Err(format!(
@@ -213,20 +233,58 @@ impl Config {
                     ch.name, canvas.width, canvas.height
                 ));
             }
-            frames.push(crosslay_format::Frame {
+            Ok(Baked {
                 offset: (ch.offset_x, ch.offset_y),
                 width: canvas.width as u16,
                 height: canvas.height as u16,
                 anchor: (canvas.anchor.0 as u16, canvas.anchor.1 as u16),
-                pixels: bytes,
-            });
-        }
-        Ok(crosslay_format::encode(&settings, &frames))
+                pixels: canvas.to_bgra_bytes(),
+            })
+        };
+        let rendered = self
+            .crosshairs
+            .iter()
+            .map(|ch| {
+                Ok((
+                    render(ch)?,
+                    ch.right_click.as_deref().map(render).transpose()?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let profiles: Vec<_> = rendered
+            .iter()
+            .map(|(main, alt)| crosslay_format::Profile {
+                main: main.frame(),
+                right_click: alt.as_ref().map(Baked::frame),
+            })
+            .collect();
+        Ok(crosslay_format::encode(&settings, &profiles))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active(&self) -> &Crosshair {
         &self.crosshairs[self.profile % self.crosshairs.len()]
+    }
+}
+
+/// A rendered frame that owns its pixels.
+struct Baked {
+    offset: (i32, i32),
+    width: u16,
+    height: u16,
+    anchor: (u16, u16),
+    pixels: Vec<u8>,
+}
+
+impl Baked {
+    fn frame(&self) -> crosslay_format::Frame<'_> {
+        crosslay_format::Frame {
+            offset: self.offset,
+            width: self.width,
+            height: self.height,
+            anchor: self.anchor,
+            pixels: &self.pixels,
+        }
     }
 }
 
@@ -250,6 +308,8 @@ pub fn config_text(cfg: &Config) -> String {
 # monitor      0 = primary monitor, 1.. = other monitors in system order
 # profile      index of the [[crosshair]] shown at startup (0 = first)
 # auto_update  check for a new version when the overlay starts
+# right_click  \"hold\": show a crosshair's right_click crosshair while the
+#              right mouse button is held; \"toggle\": each click switches
 # hotkeys      e.g. \"Ctrl+Alt+X\", \"Shift+F8\", \"Numpad5\"; \"\" disables one
 #
 # Each [[crosshair]] is a profile you can cycle through. The settings follow
@@ -270,6 +330,10 @@ pub fn config_text(cfg: &Config) -> String {
 #   image_scale             scale factor for the image
 #   opacity                 0.0 to 1.0, applies to the whole crosshair
 #   offset_x, offset_y      move the crosshair away from the screen centre
+#   [crosshair.right_click] optional: a second crosshair with the same fields,
+#                           shown while the right mouse button is held (e.g.
+#                           aiming down sights). Leave it out to keep one
+#                           crosshair; the overlay then ignores the mouse.
 
 {body}"
     )
@@ -356,17 +420,58 @@ mod tests {
         // The baked file holds every crosshair, the settings and real pixels.
         let bytes = std::fs::read(dir.join(BAKED_FILE)).unwrap();
         let baked = crosslay_format::Baked::parse(&bytes).unwrap();
-        assert_eq!(baked.frame_count(), cfg.crosshairs.len());
+        assert_eq!(baked.profile_count(), cfg.crosshairs.len());
         assert_eq!(baked.settings.profile, 2);
         assert_eq!(
             baked.settings.hotkeys[Action::Toggle as usize].vk,
             b'X' as u16
         );
-        let dot = baked.frame(1);
+        let dot = baked.profile(1).main;
         let canvas = cfg.crosshairs[1].render_shapes();
         assert_eq!(dot.pixels, canvas.to_bgra_bytes().as_slice());
         assert_eq!(dot.anchor, (canvas.anchor.0 as u16, canvas.anchor.1 as u16));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn right_click_crosshair_round_trips() {
+        let dir = std::env::temp_dir().join(format!("crosslay-rc-{}", std::process::id()));
+        let mut cfg = Config {
+            right_click: RightClickMode::Toggle,
+            ..Config::default()
+        };
+        let mut aim = cfg.crosshairs[0].right_click_template();
+        aim.center_dot = true;
+        aim.inner_lines = Lines::HIDDEN;
+        aim.outer_lines = Lines::HIDDEN;
+        aim.offset_y = 3;
+        cfg.crosshairs[0].right_click = Some(Box::new(aim.clone()));
+        let text = config_text(&cfg);
+        assert!(text.contains("[crosshair.right_click]"), "{text}");
+        assert!(text.contains("right_click = \"toggle\""), "{text}");
+        assert_eq!(Config::parse(&text).unwrap(), cfg);
+
+        cfg.save(&dir).unwrap();
+        let bytes = std::fs::read(dir.join(BAKED_FILE)).unwrap();
+        let baked = crosslay_format::Baked::parse(&bytes).unwrap();
+        assert_eq!(
+            baked.settings.right_click,
+            crosslay_format::RightClick::Toggle
+        );
+        let p = baked.profile(0);
+        let alt = p.right_click.expect("profile 0 has a right-click frame");
+        assert_eq!(alt.pixels, aim.render_shapes().to_bgra_bytes().as_slice());
+        assert_eq!(alt.offset, (0, 3));
+        assert_ne!(p.main.pixels, alt.pixels);
+        assert!(baked.profile(1).right_click.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+
+        // Nesting is refused.
+        let mut nested = Config::default();
+        let mut inner = nested.crosshairs[0].clone();
+        inner.right_click = Some(Box::new(Crosshair::default()));
+        nested.crosshairs[0].right_click = Some(Box::new(inner));
+        assert!(nested.validate().is_err());
     }
 
     #[test]
