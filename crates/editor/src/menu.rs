@@ -6,7 +6,7 @@
 
 use crate::canvas::Canvas;
 use crate::color::Color;
-use crate::config::{self, Config};
+use crate::config::{self, Config, RightClickMode};
 use crate::crosshair::{Crosshair, Lines};
 use crate::updater::{self, Release};
 use crosslay_format::CONFIG_FILE;
@@ -84,6 +84,9 @@ struct Menu {
     changed_at: Option<Instant>,
     live_apply: bool,
     selected: usize,
+    /// Editing the selected crosshair's right-click crosshair instead of the
+    /// crosshair itself (when it has one).
+    editing_right_click: bool,
     status: Status,
     preview: Option<Preview>,
     zoom: u32,
@@ -127,6 +130,7 @@ impl Menu {
             changed_at: None,
             live_apply: true,
             selected,
+            editing_right_click: false,
             status,
             preview: None,
             zoom: 6,
@@ -148,6 +152,22 @@ impl Menu {
         &mut self.cfg.crosshairs[self.selected]
     }
 
+    /// The crosshair the editing panels and the preview work on: the
+    /// selected one, or its right-click crosshair.
+    fn target(&mut self) -> &mut Crosshair {
+        let alt = self.editing_right_click;
+        let ch = self.current();
+        if alt && ch.right_click.is_some() {
+            ch.right_click.as_deref_mut().expect("checked above")
+        } else {
+            ch
+        }
+    }
+
+    fn editing_right_click(&mut self) -> bool {
+        self.editing_right_click && self.current().right_click.is_some()
+    }
+
     fn select(&mut self, i: usize) {
         self.selected = i.min(self.cfg.crosshairs.len() - 1);
         // The crosshair being edited is the one the overlay shows.
@@ -156,7 +176,7 @@ impl Menu {
     }
 
     fn sync_image_input(&mut self) {
-        self.image_input = self.current().image.clone();
+        self.image_input = self.target().image.clone();
     }
 
     fn set_status(&mut self, text: impl Into<String>, error: bool) {
@@ -241,7 +261,7 @@ impl Menu {
     fn set_image(&mut self, src: &Path) {
         match self.import_png(src) {
             Ok(rel) => {
-                self.current().image = rel;
+                self.target().image = rel;
                 self.sync_image_input();
                 self.set_status(format!("Imported {}", src.display()), false);
             }
@@ -558,11 +578,13 @@ impl Menu {
             .max_height(ui.available_height() - 110.0)
             .show(ui, |ui| {
                 for (i, ch) in self.cfg.crosshairs.iter().enumerate() {
-                    let label = if ch.uses_image() {
-                        format!("{}  (image)", ch.name)
-                    } else {
-                        ch.name.clone()
-                    };
+                    let mut label = ch.name.clone();
+                    if ch.uses_image() {
+                        label.push_str("  (image)");
+                    }
+                    if ch.right_click.is_some() {
+                        label.push_str("  + right click");
+                    }
                     let resp = ui.add_sized(
                         [ui.available_width(), 24.0],
                         egui::Button::selectable(i == self.selected, label),
@@ -635,6 +657,7 @@ impl Menu {
             ui.add(egui::TextEdit::singleline(&mut ch.name).desired_width(240.0));
         });
         ui.add_space(8.0);
+        self.right_click_bar(ui);
 
         // ---- Image -------------------------------------------------------
         section(ui, "Image", |ui| {
@@ -661,12 +684,12 @@ impl Menu {
                     };
                     self.set_image(&p);
                 }
-                if self.current().uses_image() && ui.button("Remove").clicked() {
-                    self.current().image.clear();
+                if self.target().uses_image() && ui.button("Remove").clicked() {
+                    self.target().image.clear();
                     self.image_input.clear();
                 }
             });
-            let ch = self.current();
+            let ch = self.target();
             if ch.uses_image() {
                 grid(ui, "image_grid", |ui| {
                     ui.label("Scale");
@@ -680,8 +703,8 @@ impl Menu {
             }
         });
 
-        let uses_image = self.current().uses_image();
-        let ch = self.current();
+        let uses_image = self.target().uses_image();
+        let ch = self.target();
 
         // ---- Shapes (Valorant-style) -------------------------------------
         let disabled_note = |ui: &mut egui::Ui| {
@@ -750,7 +773,8 @@ impl Menu {
             ui.label(
                 RichText::new(
                     "Paste a code from Valorant (Settings > Crosshair > Import) to copy its \
-                     primary crosshair, or copy this crosshair as a code.",
+                     primary crosshair (its ADS crosshair when editing the right-click \
+                     crosshair), or copy this crosshair as a code.",
                 )
                 .weak(),
             );
@@ -762,10 +786,15 @@ impl Menu {
                 );
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (ui.button("Import").clicked() || enter) && !self.code_input.trim().is_empty() {
-                    let current = self.current().clone();
-                    match crate::valorant::import(&self.code_input, &current) {
+                    let current = self.target().clone();
+                    let section = if self.editing_right_click() {
+                        crate::valorant::Section::Ads
+                    } else {
+                        crate::valorant::Section::Primary
+                    };
+                    match crate::valorant::import(&self.code_input, &current, section) {
                         Ok(ch) => {
-                            *self.current() = ch;
+                            *self.target() = ch;
                             self.set_status("Imported the Valorant crosshair code", false);
                         }
                         Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
@@ -776,7 +805,7 @@ impl Menu {
                     .on_hover_text("Copy this crosshair as a Valorant code")
                     .clicked()
                 {
-                    let code = crate::valorant::export(self.current());
+                    let code = crate::valorant::export(self.target());
                     ui.ctx().copy_text(code.clone());
                     self.code_input = code;
                     self.set_status("Copied the Valorant code to the clipboard", false);
@@ -784,7 +813,7 @@ impl Menu {
             });
         });
 
-        let ch = self.current();
+        let ch = self.target();
         // ---- Common ------------------------------------------------------
         section(ui, "Placement", |ui| {
             grid(ui, "common_grid", |ui| {
@@ -820,6 +849,71 @@ impl Menu {
             .show(ui, |ui| self.settings(ui));
     }
 
+    /// Turn the right-click crosshair on or off and pick which one to edit.
+    fn right_click_bar(&mut self, ui: &mut egui::Ui) {
+        let has = self.current().right_click.is_some();
+        section(ui, "Right-click crosshair", |ui| {
+            if !has {
+                ui.label(
+                    RichText::new(
+                        "Show a different crosshair while the right mouse button is held, \
+                         e.g. when aiming down sights. Off, the overlay doesn't watch the \
+                         mouse at all.",
+                    )
+                    .weak(),
+                );
+                if ui.button("Add a right-click crosshair").clicked() {
+                    let copy = self.current().right_click_template();
+                    self.current().right_click = Some(Box::new(copy));
+                    self.editing_right_click = true;
+                    self.sync_image_input();
+                }
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.label("Editing");
+                let mut alt = self.editing_right_click;
+                ui.selectable_value(&mut alt, false, "Normal");
+                ui.selectable_value(&mut alt, true, "Right mouse held");
+                if alt != self.editing_right_click {
+                    self.editing_right_click = alt;
+                    self.sync_image_input();
+                }
+                ui.separator();
+                if ui
+                    .button("Copy from normal")
+                    .on_hover_text("Make the right-click crosshair the same as the normal one")
+                    .clicked()
+                {
+                    let copy = self.current().right_click_template();
+                    self.current().right_click = Some(Box::new(copy));
+                    self.sync_image_input();
+                }
+                if ui.button("Remove").clicked() {
+                    self.current().right_click = None;
+                    self.editing_right_click = false;
+                    self.sync_image_input();
+                }
+            });
+            let how = match self.cfg.right_click {
+                RightClickMode::Hold => "Shown while the right mouse button is held.",
+                RightClickMode::Toggle => "Each right click switches to it and back.",
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{how} Change this under Settings & hotkeys. The settings below \
+                     edit the {} crosshair.",
+                    if self.editing_right_click {
+                        "right-click"
+                    } else {
+                        "normal"
+                    }
+                ))
+                .weak(),
+            );
+        });
+    }
+
     fn settings(&mut self, ui: &mut egui::Ui) {
         grid(ui, "settings_grid", |ui| {
             ui.label("Monitor");
@@ -828,6 +922,18 @@ impl Menu {
             ui.end_row();
             ui.label("Start visible");
             ui.checkbox(&mut self.cfg.visible, "");
+            ui.end_row();
+            ui.label("Right-click crosshair");
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.cfg.right_click,
+                    RightClickMode::Hold,
+                    "While held",
+                )
+                .on_hover_text("Shown while the right mouse button is held");
+                ui.selectable_value(&mut self.cfg.right_click, RightClickMode::Toggle, "Toggle")
+                    .on_hover_text("Each right click switches, for games with toggle aim");
+            });
             ui.end_row();
             ui.label("Updates");
             ui.horizontal(|ui| {
@@ -947,7 +1053,7 @@ impl Menu {
     }
 
     fn update_preview(&mut self, ctx: &egui::Context) {
-        let ch = self.cfg.crosshairs[self.selected.min(self.cfg.crosshairs.len() - 1)].clone();
+        let ch = self.target().clone();
         if self.preview.as_ref().is_some_and(|p| p.key == ch) {
             return;
         }

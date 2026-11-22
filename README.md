@@ -24,6 +24,10 @@ reasoning behind it.
 - **No timers, no polling.** The overlay sleeps until Windows wakes it for a hotkey, a change in
   its data folder, a display change, or a new foreground window (to stay on top). An idle
   overlay uses 0 % CPU.
+- **Right-click crosshair without a loop.** Both crosshairs are drawn up front into two windows.
+  Pressing or releasing the right mouse button just shows one and hides the other. The button
+  is read through raw input, which Windows posts after the fact, so it can never delay your
+  mouse. It's only switched on for crosshairs that have a right-click version.
 - **Nothing to parse.** The editor bakes crosshairs into raw pixels, so the overlay has no config
   parser, no PNG decoder and no drawing code. Its only dependency is the Windows API bindings.
 - **No GUI toolkit or GPU context in the overlay.** Those live in the editor, which you close
@@ -69,9 +73,15 @@ program already uses one, the overlay tells you at startup and keeps running wit
   thickness), and **inner and outer lines**, each with show, opacity, length, thickness and
   offset. Each set of lines can have a **separate vertical length**, so you can make a wide or
   tall crosshair. An offset of 0 makes the lines meet in a solid cross.
+- **Right-click crosshair:** give any crosshair a second look to show while the right mouse
+  button is held, for aiming down sights. Click *Add a right-click crosshair*, then switch
+  between *Normal* and *Right mouse held* to edit each one; the preview follows. Under
+  *Settings & hotkeys* you can make each right click toggle it instead, for games with toggle
+  aim.
 - **Valorant crosshair codes:** paste a code from Valorant (*Settings > Crosshair > Import
-  Profile Code*) to copy its primary crosshair, or copy any crosshair out as a code to use in the
-  game. Movement and firing error are ignored because they don't apply to an overlay.
+  Profile Code*) to copy its primary crosshair (or its ADS crosshair, when you're editing the
+  right-click crosshair), or copy any crosshair out as a code to use in the game. Movement and
+  firing error are ignored because they don't apply to an overlay.
 - **Your own PNG:** choose a file, type a path, or drop a PNG on the window. It's copied into an
   `images` folder so it keeps working if you move the original.
 - **Live preview** at real size or zoomed in, on game-like, dark, light or checkerboard
@@ -119,6 +129,7 @@ monitor = 0             # 0 = primary monitor, 1.. = other monitors
 profile = 0             # crosshair shown at startup
 visible = true
 auto_update = true      # check for a new version when the overlay starts
+right_click = "hold"    # or "toggle": how right-click crosshairs switch
 
 [hotkeys]
 toggle = "Ctrl+Alt+X"
@@ -164,6 +175,29 @@ offset = 10
 
 These are Valorant's defaults. Any field you leave out takes its default.
 
+To show something else while the right mouse button is held, add a `right_click` table to the
+crosshair. It takes the same fields:
+
+```toml
+[crosshair.right_click]
+center_dot = true
+
+[crosshair.right_click.inner_lines]
+show = false
+
+[crosshair.right_click.outer_lines]
+show = false
+```
+
+### Right-click crosshair and resource use
+
+A crosshair without a right-click crosshair costs exactly what it did before: the overlay doesn't
+listen to the mouse at all. With one, Windows sends the overlay every mouse report (there's no
+way to ask for button presses only). The overlay reads them in batches at most every 4 ms, checks
+for a right-button change and goes back to sleep, so the swap is at most 4 ms late. The CI run measures this cost; see *Measure* below. If a game runs as
+administrator, run `crosslay.exe` as administrator too, or Windows won't pass it that game's
+mouse input.
+
 ## Updates
 
 When `auto_update` is on (the default), the overlay starts `crosslay-editor --update` once each
@@ -203,8 +237,10 @@ from the Actions tab (*Run workflow*). It has four jobs:
 1. **Test** runs `rustfmt`, Clippy and the tests on Linux and Windows.
 2. **Build** builds both exes for Windows x64 and ARM64. Download them from the run's
    *Artifacts* section, and see their sizes in the run summary.
-3. **Measure** runs the x64 overlay idle for 20 seconds and puts its memory, CPU time, threads,
-   handles and loaded DLLs in the run summary.
+3. **Measure** runs the x64 overlay idle for 20 seconds, then feeds it 20,000 synthetic mouse
+   moves with and without a right-click crosshair, and checks that holding the right button
+   swaps the crosshair. Memory, CPU time (including microseconds per mouse move), threads,
+   handles and loaded DLLs go in the run summary.
 4. **Release** runs only for a version tag. It publishes a GitHub Release with a zip per
    architecture plus the bare exes the updater downloads.
 

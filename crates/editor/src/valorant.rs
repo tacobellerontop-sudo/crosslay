@@ -2,8 +2,9 @@
 //!
 //! A code is a `;`-separated list of `key;value` pairs, split into sections:
 //! general settings first, then `P` (primary), `A` (aim down sights) and `S`
-//! (sniper). Only the primary crosshair maps onto crosslay. Keys that are left
-//! out take Valorant's defaults, which are also [`Crosshair::default`].
+//! (sniper). The primary crosshair maps onto a crosslay crosshair and the ADS
+//! one onto its right-click crosshair. Keys that are left out take Valorant's
+//! defaults, which are also [`Crosshair::default`].
 //! Movement and firing error don't apply to a static overlay and are ignored.
 
 use crate::color::Color;
@@ -21,10 +22,31 @@ const PALETTE: [Color; 8] = [
     Color::rgb(255, 0, 0),     // red
 ];
 
-/// Apply a Valorant code's primary crosshair to `base`, keeping its name,
-/// image, placement and outline colour.
-pub fn import(code: &str, base: &Crosshair) -> Result<Crosshair, String> {
+/// Which crosshair of a code to read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Primary,
+    /// The aim-down-sights crosshair, falling back to the primary one when
+    /// the code has no ADS settings.
+    Ads,
+}
+
+/// Apply one of a Valorant code's crosshairs to `base`, keeping its name,
+/// image, placement, outline colour and right-click crosshair.
+pub fn import(code: &str, base: &Crosshair, section: Section) -> Result<Crosshair, String> {
     let code = code.trim();
+    // An ADS section with at least one setting in it.
+    let has_ads = code
+        .split(';')
+        .map(str::trim)
+        .skip_while(|t| *t != "A")
+        .nth(1)
+        .is_some_and(|t| !matches!(t, "P" | "S"));
+    let wanted = if section == Section::Ads && has_ads {
+        'A'
+    } else {
+        'P'
+    };
     let mut tokens = code.split(';').map(str::trim);
     if tokens.next() != Some("0") {
         return Err("not a Valorant crosshair code (it should start with \"0;\")".into());
@@ -38,6 +60,7 @@ pub fn import(code: &str, base: &Crosshair) -> Result<Crosshair, String> {
         offset_x: base.offset_x,
         offset_y: base.offset_y,
         outline_color: base.outline_color,
+        right_click: base.right_click.clone(),
         ..defaults
     };
     let mut color_index = 0usize;
@@ -56,7 +79,7 @@ pub fn import(code: &str, base: &Crosshair) -> Result<Crosshair, String> {
         let value = tokens
             .next()
             .ok_or_else(|| format!("the code ends after {key:?} without a value"))?;
-        if section != 'P' {
+        if section != wanted {
             continue;
         }
         let num = || -> Result<f32, String> {
@@ -213,8 +236,8 @@ mod tests {
     #[test]
     fn default_code_is_default_crosshair() {
         let base = Crosshair::default();
-        assert_eq!(import("0", &base).unwrap(), base);
-        assert_eq!(import("0;P", &base).unwrap(), base);
+        assert_eq!(import("0", &base, Section::Primary).unwrap(), base);
+        assert_eq!(import("0;P", &base, Section::Primary).unwrap(), base);
         assert_eq!(export(&base), "0;P");
     }
 
@@ -227,6 +250,7 @@ mod tests {
         let ch = import(
             "0;s;1;P;c;5;h;0;f;0;0l;4;0v;9;0g;1;0o;0;0a;1;0f;0;1b;0;A;c;1;S;c;7",
             &base,
+            Section::Primary,
         )
         .unwrap();
         assert_eq!(ch.name, "Mine");
@@ -239,13 +263,18 @@ mod tests {
         assert_eq!(ch.inner_lines.opacity, 1.0);
         assert!(!ch.outer_lines.show);
         // Linked vertical length follows the horizontal one.
-        let linked = import("0;P;0l;10", &base).unwrap();
+        let linked = import("0;P;0l;10", &base, Section::Primary).unwrap();
         assert_eq!(linked.inner_lines.vertical_length, 10);
     }
 
     #[test]
     fn imports_custom_colour() {
-        let ch = import("0;P;c;8;u;FF8000FF;d;1;z;3", &Crosshair::default()).unwrap();
+        let ch = import(
+            "0;P;c;8;u;FF8000FF;d;1;z;3",
+            &Crosshair::default(),
+            Section::Primary,
+        )
+        .unwrap();
         assert_eq!(ch.color, Color::rgb(255, 128, 0));
         assert!(ch.center_dot);
         assert_eq!(ch.center_dot_thickness, 3);
@@ -264,16 +293,43 @@ mod tests {
         ch.inner_lines.vertical_length = 12;
         ch.outer_lines.show = false;
         let code = export(&ch);
-        assert_eq!(import(&code, &Crosshair::default()).unwrap(), ch);
+        assert_eq!(
+            import(&code, &Crosshair::default(), Section::Primary).unwrap(),
+            ch
+        );
+    }
+
+    #[test]
+    fn imports_ads_section() {
+        let base = Crosshair {
+            right_click: Some(Box::default()),
+            ..Default::default()
+        };
+        let code = "0;P;c;5;0l;4;A;c;1;d;1;0b;0";
+        let primary = import(code, &base, Section::Primary).unwrap();
+        assert_eq!(primary.color, Color::rgb(0, 255, 255));
+        assert!(
+            primary.right_click.is_some(),
+            "kept the right-click crosshair"
+        );
+        let ads = import(code, &base, Section::Ads).unwrap();
+        assert_eq!(ads.color, Color::rgb(0, 255, 0));
+        assert!(ads.center_dot);
+        assert!(!ads.inner_lines.show);
+        // No ADS settings in the code: use the primary crosshair.
+        for code in ["0;P;c;5", "0;P;c;5;A;S;c;1"] {
+            let ads = import(code, &base, Section::Ads).unwrap();
+            assert_eq!(ads.color, Color::rgb(0, 255, 255), "{code}");
+        }
     }
 
     #[test]
     fn rejects_garbage() {
         let base = Crosshair::default();
-        assert!(import("hello", &base).is_err());
-        assert!(import("0;P;c", &base).is_err());
-        assert!(import("0;P;c;9", &base).is_err());
-        assert!(import("0;P;0l;-3", &base).is_err());
-        assert!(import("0;P;c;8", &base).is_err());
+        assert!(import("hello", &base, Section::Primary).is_err());
+        assert!(import("0;P;c", &base, Section::Primary).is_err());
+        assert!(import("0;P;c;9", &base, Section::Primary).is_err());
+        assert!(import("0;P;0l;-3", &base, Section::Primary).is_err());
+        assert!(import("0;P;c;8", &base, Section::Primary).is_err());
     }
 }

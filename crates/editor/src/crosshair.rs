@@ -50,6 +50,12 @@ pub struct Crosshair {
     /// Shift the crosshair away from the screen centre, in pixels.
     pub offset_x: i32,
     pub offset_y: i32,
+
+    /// A different crosshair to show while the right mouse button is held
+    /// (or toggled, see `right_click` in the config), for aiming down sights.
+    /// `None` keeps this one; the overlay then doesn't watch the mouse at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_click: Option<Box<Crosshair>>,
 }
 
 /// One set of four lines around the centre.
@@ -137,6 +143,7 @@ impl Default for Crosshair {
             opacity: 1.0,
             offset_x: 0,
             offset_y: 0,
+            right_click: None,
         }
     }
 }
@@ -148,6 +155,14 @@ const MAX_THICKNESS: u32 = 64;
 const MAX_OUTLINE: u32 = 16;
 
 impl Crosshair {
+    /// A copy of this crosshair to start its right-click crosshair from.
+    pub fn right_click_template(&self) -> Crosshair {
+        Crosshair {
+            right_click: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether this crosshair is drawn from a PNG instead of shapes.
     pub fn uses_image(&self) -> bool {
         !self.image.trim().is_empty()

@@ -94,7 +94,32 @@ running exe but not overwriting it), moves the new ones into place, and restarts
 release build fails if the tag doesn't match the version in `Cargo.toml`, and the updater
 remembers the last tag it installed.
 
-### `overlay.bin` (format v1, little-endian)
+### Right-click crosshair
+
+Each profile can have a second crosshair for while the right mouse button is held (aim down
+sights), or toggled by each right click. The constraint is the same as everywhere else: nothing
+may run while nothing happens, and nothing in the overlay may slow the game down.
+
+- **Pre-drawn, swapped on the event.** The overlay has two layered windows. Each redraw uploads
+  the normal crosshair to one and the right-click crosshair to the other. A button press only
+  shows one and hides the other in a single `DeferWindowPos` batch. DWM already holds both
+  images, so a swap reads no file, copies no pixels and allocates nothing.
+- **Raw input, not a mouse hook.** A low-level mouse hook (`WH_MOUSE_LL`) sits in the input path:
+  every mouse report waits for the hook to return, and a busy hook adds latency to the game's
+  aim. Raw input (`RegisterRawInputDevices` with `RIDEV_INPUTSINK`) is posted to the overlay's
+  queue after the fact, so it can't delay anything. Neither API can deliver button presses
+  alone, so a moving mouse keeps waking the overlay. To keep that down, after reading input the
+  overlay waits 4 ms on a high-resolution waitable timer before it looks at its queue again,
+  then reads everything that piled up. A 1000 to 8000 Hz mouse costs at most 250 wake-ups a
+  second, and a swap is at most 4 ms late. CI measures the cost per mouse report.
+- **Opt-in by construction.** Raw input is registered only while the shown profile has a
+  right-click crosshair and the overlay is visible, and removed otherwise. A setup without one
+  never hears from the mouse.
+- **No animation.** A swap is instant. Animating (say, lines spreading while firing) would need
+  a timer and a redraw per step, which this design avoids. A "while firing" crosshair could reuse
+  the same swap on the left button if it's ever wanted.
+
+### `overlay.bin` (format v2, little-endian)
 
 | Offset | Size | Field |
 |---|---|---|
@@ -104,9 +129,14 @@ remembers the last tag it installed.
 | 8 | 2 | monitor (0 = primary) |
 | 10 | 2 | startup profile |
 | 12 | 20 | 5 hotkeys × (modifiers u16, virtual key u16): toggle, editor, next, previous, quit. vk 0 = disabled |
-| 32 | 2 | frame count |
-| 34 | 2 | reserved |
-| 36 | … | frames: offset x i32, offset y i32, width u16, height u16, anchor x u16, anchor y u16, then width × height premultiplied BGRA pixels |
+| 32 | 2 | profile count |
+| 34 | 2 | right-click mode (0 = while held, 1 = toggle) |
+| 36 | … | profiles: a frame, then its right-click frame if the frame's flags bit 0 is set |
+
+A frame is: offset x i32, offset y i32, width u16, height u16, anchor x u16, anchor y u16,
+flags u16 (bit 0 = a right-click frame follows), reserved u16, then width × height premultiplied
+BGRA pixels. Version 1 files (crosslay 0.1) are still read: their frame headers end after the
+anchor and they have no right-click frames.
 
 The pixel layout is exactly what a 32-bit top-down DIB expects, so the overlay copies it with no
 per-pixel work.
@@ -117,4 +147,5 @@ per-pixel work.
   design avoids.
 - A Linux or macOS overlay. The architecture allows one (a shaped, input-transparent X11/Wayland
   layer or an `NSWindow`), but it isn't built.
-- Animated crosshairs. They'd need a timer, which breaks the "costs nothing" promise.
+- Animated crosshairs. They'd need a timer, which breaks the "costs nothing" promise. Swapping
+  to a pre-drawn crosshair on a mouse button (see above) covers the common case.

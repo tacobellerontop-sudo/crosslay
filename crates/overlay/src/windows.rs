@@ -5,16 +5,25 @@
 //! composites them every frame at no cost to us. The thread then blocks in
 //! `MsgWaitForMultipleObjects` on two things only:
 //!
-//! - its message queue (hotkeys, display changes, foreground changes), and
+//! - its message queue (hotkeys, display changes, foreground changes, and
+//!   mouse input when a right-click crosshair is in use), and
 //! - a change notification on the data folder (the editor saved).
 //!
 //! There are no timers, so an idle overlay never wakes up.
+//!
+//! A right-click crosshair lives in a second window that is drawn at the same
+//! time as the first. Pressing or releasing the right button only shows one
+//! window and hides the other: no file read, no pixel copy, no allocation.
+//! The button is watched through raw input, which Windows posts to our queue
+//! after the fact, so unlike a low-level mouse hook it can never delay the
+//! game's input. It is only registered while the shown crosshair has a
+//! right-click version, so everyone else pays nothing for it.
 //!
 //! Like every overlay that doesn't inject into games, it shows over windowed
 //! and borderless-windowed games, not exclusive fullscreen.
 
 use crate::fallback;
-use crosslay_format::{Action, BAKED_FILE, Baked, Frame, Hotkey, Settings};
+use crosslay_format::{Action, BAKED_FILE, Baked, Frame, Hotkey, Profile, RightClick, Settings};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -38,7 +47,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, INFINITE, SetProcessWorkingSetSize,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateMutexW, CreateWaitableTimerExW, GetCurrentProcess,
+    INFINITE, SetProcessWorkingSetSize, SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows_sys::Win32::UI::HiDpi::{
@@ -47,14 +57,19 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
 };
+use windows_sys::Win32::UI::Input::{
+    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, HWND_TOPMOST,
-    MB_ICONERROR, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE,
-    PeekMessageW, PostMessageW, QS_ALLINPUT, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE,
-    WM_HOTKEY, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DispatchMessageW,
+    EVENT_SYSTEM_FOREGROUND, EndDeferWindowPos, HWND_TOPMOST, MB_ICONERROR, MB_ICONWARNING, MB_OK,
+    MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostMessageW,
+    QS_ALLINPUT, RegisterClassExW, SW_HIDE, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_INPUT,
+    WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 /// Posted to ourselves when the display layout changes.
@@ -65,9 +80,30 @@ const CLASS_NAME: &str = "crosslay_overlay";
 /// Held while an overlay runs, so a second one just exits.
 const MUTEX_NAME: &str = "Local\\crosslay-overlay";
 const EDITOR_EXE: &str = "crosslay-editor.exe";
+/// `RAWMOUSE::usButtonFlags` bits.
+const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+/// `WM_INPUT`'s wParam when the input arrived while we were in the foreground.
+const RIM_INPUT: usize = 0;
+/// After handling mouse input, wait this long (in 100 ns units) before
+/// looking at the queue again, so a moving mouse wakes the overlay at most
+/// every 4 ms instead of for every report (1000 to 8000 a second). A button
+/// press is handled when it's read, so a swap is at most this much late.
+const MOUSE_SETTLE: i64 = 40_000;
+/// A transparent pixel, to free the right-click window's image when the
+/// shown profile has none.
+const EMPTY: Frame<'static> = Frame {
+    offset: (0, 0),
+    width: 1,
+    height: 1,
+    anchor: (0, 0),
+    pixels: &[0; 4],
+};
 
 /// Read by the foreground-change callback, which gets no user data.
 static OVERLAY: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+/// The window holding the right-click crosshair.
+static OVERLAY_ALT: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 static SHOWN: AtomicBool = AtomicBool::new(false);
 
 fn wide(s: &str) -> Vec<u16> {
@@ -94,7 +130,10 @@ fn message_box(msg: &str, icon: u32) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_DISPLAYCHANGE {
-        unsafe { PostMessageW(hwnd, WM_APP_REPOSITION, 0, 0) };
+        // Both windows get it; one redraw does both.
+        if hwnd == OVERLAY.load(Ordering::Relaxed) {
+            unsafe { PostMessageW(hwnd, WM_APP_REPOSITION, 0, 0) };
+        }
         return 0;
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -113,6 +152,7 @@ unsafe extern "system" fn on_foreground(
 ) {
     if SHOWN.load(Ordering::Relaxed) {
         bring_to_top(OVERLAY.load(Ordering::Relaxed));
+        bring_to_top(OVERLAY_ALT.load(Ordering::Relaxed));
     }
 }
 
@@ -154,24 +194,33 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
             return Err("failed to register the overlay window class".into());
         }
         let title = wide("crosslay");
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            class_name.as_ptr(),
-            title.as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            null_mut(),
-            null_mut(),
-            hinstance,
-            null(),
-        );
-        if hwnd.is_null() {
+        let create = || {
+            CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE,
+                class_name.as_ptr(),
+                title.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                hinstance,
+                null(),
+            )
+        };
+        let hwnd = create();
+        let alt_hwnd = create();
+        if hwnd.is_null() || alt_hwnd.is_null() {
             return Err("failed to create the overlay window".into());
         }
         OVERLAY.store(hwnd, Ordering::Relaxed);
+        OVERLAY_ALT.store(alt_hwnd, Ordering::Relaxed);
 
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -194,6 +243,10 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
 
         let mut app = App {
             hwnd,
+            alt_hwnd,
+            has_alt: false,
+            watching_mouse: false,
+            aiming: false,
             file: dir.join(BAKED_FILE),
             dir,
             settings: Settings::default(),
@@ -227,6 +280,16 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
             );
         }
 
+        // High-resolution, so the settle wait is ~4 ms without raising the
+        // system timer resolution. Without it (before Windows 10 1803) every
+        // report is handled as it comes.
+        let settle = CreateWaitableTimerExW(
+            null(),
+            null(),
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS,
+        );
+
         let mut msg: MSG = std::mem::zeroed();
         loop {
             let r = MsgWaitForMultipleObjects(watching as u32, &watch, 0, INFINITE, QS_ALLINPUT);
@@ -235,6 +298,7 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                 app.file_changed();
                 continue;
             }
+            let mut mouse_input = false;
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 match msg.message {
                     WM_QUIT => return Ok(()),
@@ -246,6 +310,15 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                         Some(&a) => app.handle(a),
                         None => {}
                     },
+                    WM_INPUT => {
+                        mouse_input = true;
+                        app.mouse_buttons(right_button(msg.lParam));
+                        // Windows wants this for input that arrived while we
+                        // had the focus (we never do, but be correct).
+                        if msg.wParam == RIM_INPUT {
+                            DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam);
+                        }
+                    }
                     WM_APP_REPOSITION => app.redraw(),
                     WM_APP_QUIT => {
                         app.unregister_hotkeys();
@@ -256,12 +329,27 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
                     }
                 }
             }
+            // Let the next few mouse reports pile up and read them in one go.
+            if mouse_input && !settle.is_null() {
+                let due = -MOUSE_SETTLE; // negative = relative
+                if SetWaitableTimer(settle, &due, 0, None, null(), 0) != 0 {
+                    WaitForSingleObject(settle, INFINITE);
+                }
+            }
         }
     }
 }
 
 struct App {
     hwnd: HWND,
+    /// Holds the current profile's right-click crosshair, if it has one.
+    alt_hwnd: HWND,
+    /// `alt_hwnd` holds a crosshair.
+    has_alt: bool,
+    /// Raw mouse input is registered.
+    watching_mouse: bool,
+    /// The right-click crosshair is the one to show (button held, or toggled).
+    aiming: bool,
     dir: PathBuf,
     file: PathBuf,
     /// Settings from the last valid file.
@@ -417,42 +505,164 @@ impl App {
     fn draw(&mut self, loaded: Option<&Loaded>) {
         if !self.visible {
             SHOWN.store(false, Ordering::Relaxed);
-            unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+            self.watch_mouse(false);
+            unsafe {
+                ShowWindow(self.hwnd, SW_HIDE);
+                ShowWindow(self.alt_hwnd, SW_HIDE);
+            }
             return;
         }
         let fallback_pixels;
         let baked;
-        let frame: Frame<'_> = match loaded {
+        let profile: Profile<'_> = match loaded {
             Some(l) => {
                 baked = l.baked();
-                self.profile %= baked.frame_count();
-                baked.frame(self.profile)
+                self.profile %= baked.profile_count();
+                baked.profile(self.profile)
             }
             None => {
                 fallback_pixels = fallback::pixels();
-                fallback::frame(&fallback_pixels)
+                Profile {
+                    main: fallback::frame(&fallback_pixels),
+                    right_click: None,
+                }
             }
         };
         let rect = monitor_rect(self.settings.monitor as usize);
-        let cx = rect.left + (rect.right - rect.left) / 2 + frame.offset.0;
-        let cy = rect.top + (rect.bottom - rect.top) / 2 + frame.offset.1;
-        let origin = POINT {
-            x: cx - frame.anchor.0 as i32,
-            y: cy - frame.anchor.1 as i32,
-        };
         unsafe {
-            present(self.hwnd, &frame, origin);
-            ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            present(self.hwnd, &profile.main, origin(&rect, &profile.main));
+            match &profile.right_click {
+                Some(alt) => present(self.alt_hwnd, alt, origin(&rect, alt)),
+                // Let go of the previous profile's image.
+                None if self.has_alt => present(self.alt_hwnd, &EMPTY, origin(&rect, &EMPTY)),
+                None => {}
+            }
         }
-        bring_to_top(self.hwnd);
+        self.has_alt = profile.right_click.is_some();
+        self.watch_mouse(self.has_alt);
         SHOWN.store(true, Ordering::Relaxed);
+        self.show_current();
         // Everything above was temporary. Hand the pages back so the idle
         // footprint is what's really in use.
         unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
     }
+
+    /// Show the normal or the right-click window and hide the other, in one
+    /// step so there's never a frame with both or neither.
+    fn show_current(&self) {
+        let (show, hide) = if self.aiming && self.has_alt {
+            (self.alt_hwnd, self.hwnd)
+        } else {
+            (self.hwnd, self.alt_hwnd)
+        };
+        let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        unsafe {
+            let mut dwp = BeginDeferWindowPos(2);
+            if !dwp.is_null() {
+                dwp = DeferWindowPos(dwp, show, HWND_TOPMOST, 0, 0, 0, 0, keep | SWP_SHOWWINDOW);
+            }
+            if !dwp.is_null() {
+                dwp = DeferWindowPos(
+                    dwp,
+                    hide,
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    keep | SWP_NOZORDER | SWP_HIDEWINDOW,
+                );
+            }
+            if dwp.is_null() || EndDeferWindowPos(dwp) == 0 {
+                SetWindowPos(show, HWND_TOPMOST, 0, 0, 0, 0, keep | SWP_SHOWWINDOW);
+                SetWindowPos(
+                    hide,
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    keep | SWP_NOZORDER | SWP_HIDEWINDOW,
+                );
+            }
+        }
+    }
+
+    /// Start or stop receiving mouse input. Only on while a right-click
+    /// crosshair is shown, so it costs nothing otherwise.
+    fn watch_mouse(&mut self, on: bool) {
+        if !on {
+            self.aiming = false;
+        }
+        if on == self.watching_mouse {
+            return;
+        }
+        let device = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // generic desktop
+            usUsage: 0x02,     // mouse
+            // INPUTSINK: also while another window (the game) has the focus.
+            dwFlags: if on { RIDEV_INPUTSINK } else { RIDEV_REMOVE },
+            hwndTarget: if on { self.hwnd } else { null_mut() },
+        };
+        let ok =
+            unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0 };
+        if ok {
+            self.watching_mouse = on;
+        }
+    }
+
+    /// Raw mouse input arrived with these button flags. Mouse movement (no
+    /// flags) returns straight away.
+    fn mouse_buttons(&mut self, flags: u16) {
+        if flags == 0 || !self.has_alt {
+            return;
+        }
+        let down = flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0;
+        let up = flags & RI_MOUSE_RIGHT_BUTTON_UP != 0;
+        let aiming = match self.settings.right_click {
+            RightClick::Hold if up => false,
+            RightClick::Hold if down => true,
+            RightClick::Toggle if down => !self.aiming,
+            _ => return,
+        };
+        if aiming != self.aiming {
+            self.aiming = aiming;
+            self.show_current();
+        }
+    }
+}
+
+/// Where to put `frame`'s top-left corner on the monitor `rect`.
+fn origin(rect: &RECT, frame: &Frame<'_>) -> POINT {
+    let cx = rect.left + (rect.right - rect.left) / 2 + frame.offset.0;
+    let cy = rect.top + (rect.bottom - rect.top) / 2 + frame.offset.1;
+    POINT {
+        x: cx - frame.anchor.0 as i32,
+        y: cy - frame.anchor.1 as i32,
+    }
+}
+
+/// The button flags of a `WM_INPUT` message, or 0 if it isn't mouse input.
+fn right_button(lparam: LPARAM) -> u16 {
+    unsafe {
+        let mut raw: RAWINPUT = std::mem::zeroed();
+        let mut size = size_of::<RAWINPUT>() as u32;
+        let n = GetRawInputData(
+            lparam as HRAWINPUT,
+            RID_INPUT,
+            (&mut raw as *mut RAWINPUT).cast(),
+            &mut size,
+            size_of::<RAWINPUTHEADER>() as u32,
+        );
+        if n == 0 || n == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE {
+            return 0;
+        }
+        raw.data.mouse.Anonymous.Anonymous.usButtonFlags
+    }
 }
 
 /// Upload `frame` as the window's per-pixel-alpha content at `origin`.
+/// Doesn't change whether the window is shown.
 unsafe fn present(hwnd: HWND, frame: &Frame<'_>, origin: POINT) {
     unsafe {
         let screen = GetDC(null_mut());
