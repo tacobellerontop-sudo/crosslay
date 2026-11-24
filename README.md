@@ -29,7 +29,7 @@ reasoning behind it.
   is read through raw input, which Windows posts after the fact, so it can never delay your
   mouse. It's only switched on for crosshairs that have a right-click version.
 - **Nothing to parse.** The editor bakes crosshairs into raw pixels, so the overlay has no config
-  parser, no PNG decoder and no drawing code. A crosshair built from twenty shapes costs the
+  parser, no PNG decoder and no drawing code. Any crosshair, however big, costs the
   overlay exactly what a single dot does. Its only dependency is the Windows API bindings.
 - **No GUI toolkit or GPU context in the overlay.** Those live in the editor, which you close
   when you're done.
@@ -68,42 +68,38 @@ program already uses one, the overlay tells you at startup and keeps running wit
 
 ![The crosshair editor](docs/menu.png)
 
-- **Profiles:** create, duplicate, delete, rename and reorder crosshairs, then cycle through them
-  in game with the hotkeys.
-- **Start from a template:** one click on *Classic*, *Cross*, *Gap + dot*, *Dot*, *Circle*,
-  *T*, *Chevron*, *Brackets* or *Blank* gives you a crosshair in your colour to change.
-- **Draw on the canvas:** pick a tool and draw straight onto the zoomed crosshair. *Dot*
-  places a dot where you click. *Line* draws from where you press to where you let go.
-  *Circle* and *Ring* draw from the middle outwards. *Select* picks a shape so you can drag it.
-  Everything snaps to whole pixels.
-- **Symmetry:** with *4-way* (the default) you draw one arm and get all four. *Left-right*
-  mirrors to the other side, and *Off* draws just what you drew.
-- **Simple settings:** the selected shape shows colour, opacity, size, width, outline and
-  symmetry. *More options* has the rest: position, rotation, any number of copies around the
-  centre, mirroring, outline colour and smooth edges. *+ Add shape* also offers crosses, arcs,
-  triangles and rectangles.
-- **Undo and redo** with Ctrl+Z and Ctrl+Y. Delete removes the selected shape, the arrow keys
-  nudge it a pixel, and S, D, L, C and R switch tools.
+- **Profiles:** create, duplicate, delete, rename and reorder crosshairs, each with a small
+  picture in the list, then cycle through them in game with the hotkeys.
+- **Valorant-style settings**, grouped into cards: colour, outlines (opacity, thickness, colour),
+  centre dot (opacity, size), and **inner and outer lines**, each with opacity, length,
+  thickness and offset. Each part has an on/off switch. Each set of lines can have a
+  **separate vertical length**, so you can make a wide or tall crosshair. An offset of 0 makes
+  the lines meet in a solid cross.
+- **Colour swatches:** Valorant's eight colours in one click, or *Custom* for any colour.
+- **Presets:** *Default*, *Dot*, *Cross*, *Gap*, *Gap + dot*, *Thin*, *Wide* and *Big* sit
+  under the preview. Clicking one starts you from it and keeps your colour.
 - **Right-click crosshair:** give any crosshair a second look to show while the right mouse
-  button is held, for aiming down sights. Click *+ Right-click crosshair* above the canvas, then
-  switch between *Normal* and *Right mouse held* to edit each one. Under
+  button is held, for aiming down sights. Click *+ Right-click crosshair*, then switch between
+  *Normal* and *Right mouse held* to edit each one; the preview follows. Under
   *Settings & hotkeys* you can make each right click toggle it instead, for games with toggle
   aim.
 - **Valorant crosshair codes:** paste a code from Valorant (*Settings > Crosshair > Import
-  Profile Code*) to turn its primary crosshair (or its ADS crosshair, when you're editing the
-  right-click crosshair) into layers: one cross for the inner lines, one for the outer lines
-  and a square for the centre dot, drawn pixel for pixel like the game. You can then change it
-  freely. A crosshair made only of such parts can be copied back out as a code. Movement and
+  Profile Code*) to copy its primary crosshair (or its ADS crosshair, when you're editing the
+  right-click crosshair), or copy any crosshair out as a code to use in the game. Movement and
   firing error are ignored because they don't apply to an overlay.
 - **Your own PNG:** choose a file, type a path, or drop a PNG on the window. It's copied into an
   `images` folder so it keeps working if you move the original.
-- **Live preview** at real size or zoomed in, with a pixel grid, on game-like, dark, light or
-  checkerboard backgrounds.
+- **Live preview** at real size or zoomed in, on game-like, dark, light or checkerboard
+  backgrounds.
 - **Live apply** (on by default) saves each change after a short pause, and the running overlay
   updates straight away. Turn it off to use **Save** and **Revert** yourself.
 - **Start overlay** starts `crosslay.exe` if it isn't running.
 - **Updates:** a banner offers new versions, and *Settings & hotkeys > Updates* has
   *Check now*. See [Updates](#updates).
+
+Crosshairs drawn with shapes in crosslay 0.3 or 0.4 still load. If they can be described with
+the settings above they're converted automatically; otherwise they keep working as they are,
+and the editor offers to switch them to simple settings.
 
 The crosshair selected in the editor is the one the overlay shows.
 
@@ -153,78 +149,55 @@ quit = "Ctrl+Alt+Q"     # "" turns a hotkey off
 
 [[crosshair]]
 name = "Default"
-image = ""              # PNG to show instead of the layers, e.g. "images/scope.png"
+color = "#FFFFFF"       # "#RRGGBB" or "#RRGGBBAA"
+outlines = true
+outline_opacity = 0.5
+outline_thickness = 1
+outline_color = "#000000"
+center_dot = false
+center_dot_opacity = 1.0
+center_dot_thickness = 2
+image = ""              # PNG to show instead of the shapes, e.g. "images/scope.png"
 image_scale = 1.0
 opacity = 1.0           # 0.0 to 1.0, applies to the whole crosshair
 offset_x = 0
 offset_y = 0
 
-# Layers, bottom first. This is Valorant's default crosshair.
-[[crosshair.layer]]
-name = "Outer lines"
-shape = "cross"         # cross, line, rect, circle, ring, arc or triangle
-x = 0.0                 # centre, in pixels from the screen centre (y grows down)
-y = 0.0
-width = 2.0             # left/right line length
-height = 2.0            # top/bottom line length
-thickness = 2.0
-gap = 10.0              # space between the centre and the lines; 0 = they meet
-color = "#FFFFFF"       # "#RRGGBB" or "#RRGGBBAA"
-opacity = 0.35
-outline = 1.0           # outline width in pixels, 0 = none
-outline_color = "#000000"
-outline_opacity = 0.5
-
-[[crosshair.layer]]
-name = "Inner lines"
-shape = "cross"
-width = 6.0
-height = 6.0
-thickness = 2.0
-gap = 3.0
+[crosshair.inner_lines]
+show = true
 opacity = 0.8
-outline = 1.0
-outline_opacity = 0.5
+length = 6              # left and right lines
+separate_vertical = false
+vertical_length = 6     # top and bottom lines, when separate_vertical = true
+thickness = 2
+offset = 3              # gap from the centre; 0 = the lines meet
 
-[[crosshair.layer]]
-name = "Ring"
-shape = "ring"
-width = 21.0            # diameter
-thickness = 1.5
-smooth = true           # anti-aliased edges
+[crosshair.outer_lines]
+show = true
+opacity = 0.35
+length = 2
+separate_vertical = false
+vertical_length = 2
+thickness = 2
+offset = 10
 ```
 
-What each field means for each shape:
-
-| Field | Meaning |
-|---|---|
-| `width` | Line length (cross, line), width (rect, triangle) or diameter (circle, ring, arc) |
-| `height` | Top/bottom line length (cross), height (rect, triangle) |
-| `thickness` | Line width (cross, line, ring, arc) |
-| `gap` | Space between the centre and the lines (cross) |
-| `sweep` | How many degrees of the circle an arc covers |
-| `rotation` | Degrees, clockwise |
-| `copies` | Repeat the shape evenly around the screen centre (4 = every 90°) |
-| `mirror_x`, `mirror_y` | Also draw it flipped across the centre, left-right or top-bottom |
-| `visible` | `false` hides the layer |
-
-Any field you leave out takes its default. A shape edge that falls exactly on a pixel centre
-(an even size centred on 0) gives that pixel row to the top or left, like Valorant, so a 2 px
-line centred on 0 covers pixels -1 and 0. Outlines are drawn behind every shape and never cover
-one. Crosshairs saved by crosslay 0.1 or 0.2 (with `color`, `inner_lines` and so on) still load
-and are turned into layers.
+These are Valorant's defaults. Any field you leave out takes its default. Crosshairs from
+crosslay 0.3 and 0.4 may also have `[[crosshair.layer]]` shapes; when present, they're drawn
+instead of the settings.
 
 To show something else while the right mouse button is held, add a `right_click` table to the
 crosshair. It takes the same fields:
 
 ```toml
 [crosshair.right_click]
-name = "Aiming"
+center_dot = true
 
-[[crosshair.right_click.layer]]
-shape = "rect"          # a 2 px dot
-width = 2.0
-height = 2.0
+[crosshair.right_click.inner_lines]
+show = false
+
+[crosshair.right_click.outer_lines]
+show = false
 ```
 
 ### Right-click crosshair and resource use
@@ -298,7 +271,7 @@ crates/
   format/    crosslay-format: the overlay.bin reader and writer, plus the data-folder rule.
              No dependencies. Used by both apps.
   overlay/   crosslay: the overlay. Win32 only, depends on crosslay-format and windows-sys.
-  editor/    crosslay-editor: the egui editor, config.toml handling, the shape-layer
+  editor/    crosslay-editor: the egui editor, config.toml handling, the crosshair
              rasteriser, PNG import, Valorant codes, the updater, and
              --bake / --preview / --update.
 ```
