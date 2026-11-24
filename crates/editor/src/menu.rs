@@ -15,6 +15,7 @@ use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
 };
+use eframe::emath::GuiRounding as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -710,6 +711,7 @@ impl Menu {
                 TextureOptions::NEAREST,
             ),
             size: Vec2::new(canvas.width as f32, canvas.height as f32),
+            anchor: anchor_vec(&canvas),
         };
         let entry = (ch.clone(), t.clone());
         if i < self.thumbs.len() {
@@ -1001,11 +1003,12 @@ impl Menu {
         {
             // 1× = real on-screen size, regardless of the editor's UI scaling.
             let px = self.zoom as f32 / ui.ctx().pixels_per_point();
-            let center = rect.center();
-            let min = Pos2::new(
-                center.x - (p.anchor.0 as f32 + 0.5) * px,
-                center.y - (p.anchor.1 as f32 + 0.5) * px,
-            );
+            // The screen centre (the anchor pixel's top-left corner) goes on
+            // the middle of the box, snapped to a physical pixel so every
+            // crosshair pixel stays sharp.
+            let centre = rect.center().round_to_pixels(painter.pixels_per_point());
+            let anchor = Vec2::new(p.anchor.0 as f32, p.anchor.1 as f32);
+            let min = centre - anchor * px;
             let r =
                 Rect::from_min_size(min, Vec2::new(p.size[0] as f32 * px, p.size[1] as f32 * px));
             painter.image(
@@ -1078,6 +1081,7 @@ impl Menu {
                         TextureOptions::NEAREST,
                     ),
                     size: Vec2::new(canvas.width as f32, canvas.height as f32),
+                    anchor: anchor_vec(&canvas),
                 };
                 self.presets.push((name, s, t));
             }
@@ -1201,16 +1205,34 @@ impl Menu {
 struct Thumb {
     texture: TextureHandle,
     size: Vec2,
+    /// The canvas's anchor pixel. Its top-left corner is the screen centre.
+    anchor: Vec2,
 }
 
-/// Draw `t` centred in `tile`, at `scale` real pixels per crosshair pixel
-/// (smaller if it wouldn't fit).
+fn anchor_vec(c: &Canvas) -> Vec2 {
+    Vec2::new(c.anchor.0 as f32, c.anchor.1 as f32)
+}
+
+// Where the screen centre falls on a canvas: the top-left corner of its
+// anchor pixel. The overlay puts the anchor pixel at `width / 2`, so on the
+// usual even-sized screen the true centre is that corner, the point between
+// the four middle pixels. Even-sized shapes sit evenly around it; odd ones
+// have a middle pixel, which can only land half a pixel below and right of
+// it. Every picture in the editor centres on that same corner, so it shows
+// exactly what the screen will.
+
+/// Draw `t` with its screen centre on the centre of `tile`, at `scale` real
+/// pixels per crosshair pixel (smaller if it wouldn't fit).
 fn paint_thumb(p: &egui::Painter, tile: Rect, t: &Thumb, scale: f32) {
-    let fit = ((tile.width() - 6.0) / t.size.x).min((tile.height() - 6.0) / t.size.y);
+    let c = t.anchor;
+    // Half the space the picture needs on each axis around that point.
+    let half = c.max(t.size - c);
+    let fit = ((tile.width() - 6.0) / (2.0 * half.x)).min((tile.height() - 6.0) / (2.0 * half.y));
     let s = scale.min(fit).max(0.1);
+    let min = tile.center().round_to_pixels(p.pixels_per_point()) - c * s;
     p.image(
         t.texture.id(),
-        Rect::from_center_size(tile.center(), t.size * s),
+        Rect::from_min_size(min, t.size * s),
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
