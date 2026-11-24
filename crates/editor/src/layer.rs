@@ -56,16 +56,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
-        Kind::Cross,
-        Kind::Line,
-        Kind::Rect,
-        Kind::Circle,
-        Kind::Ring,
-        Kind::Arc,
-        Kind::Triangle,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Kind::Cross => "Cross",
@@ -76,11 +66,6 @@ impl Kind {
             Kind::Arc => "Arc",
             Kind::Triangle => "Triangle",
         }
-    }
-
-    /// Whether rotating the shape changes anything.
-    pub fn rotates(self) -> bool {
-        !matches!(self, Kind::Circle | Kind::Ring)
     }
 }
 
@@ -206,6 +191,7 @@ impl Layer {
     /// The area this layer covers (its fill, without the outline), as
     /// `(min_x, min_y, max_x, max_y)` around the anchor pixel's centre, or
     /// `None` when it draws nothing.
+    #[cfg(test)]
     pub fn bounds(&self) -> Option<(f32, f32, f32, f32)> {
         let p = Prepared::new(self)?;
         let (hx, hy) = p.geo.half_extent(0.0);

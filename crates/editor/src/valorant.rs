@@ -20,7 +20,7 @@ use crate::layer::{Kind, Layer};
 use serde::Deserialize;
 
 /// Valorant's preset colours, by index (8 = custom, given with `u`).
-const PALETTE: [Color; 8] = [
+pub const PALETTE: [Color; 8] = [
     Color::rgb(255, 255, 255), // white
     Color::rgb(0, 255, 0),     // green
     Color::rgb(127, 255, 0),   // yellowish green
@@ -54,7 +54,7 @@ pub struct Settings {
 }
 
 /// One set of four lines around the centre.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Lines {
     pub show: bool,

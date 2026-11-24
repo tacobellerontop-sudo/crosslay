@@ -7,9 +7,9 @@
 use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::config::{self, Config, RightClickMode};
-use crate::crosshair::Crosshair;
-use crate::layer::{Kind, Layer};
+use crate::crosshair::{Crosshair, Lines};
 use crate::updater::{self, Release};
+use crate::valorant::Settings;
 use crosslay_format::CONFIG_FILE;
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
@@ -18,8 +18,6 @@ use eframe::egui::{
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-mod draw;
 
 /// How long the editor waits after the last change before saving.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
@@ -44,7 +42,7 @@ pub fn run(dir: PathBuf) -> Result<(), String> {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("crosslay editor {}", updater::CURRENT))
             .with_inner_size([1240.0, 780.0])
-            .with_min_inner_size([900.0, 560.0])
+            .with_min_inner_size([960.0, 560.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -91,10 +89,6 @@ struct Menu {
     /// Editing the selected crosshair's right-click crosshair instead of the
     /// crosshair itself (when it has one).
     editing_right_click: bool,
-    /// Index of the layer being edited, in the edited crosshair's layers.
-    layer: usize,
-    /// Preview drag movement not applied yet (under a pixel), in pixels.
-    drag_rest: Vec2,
     status: Status,
     preview: Option<Preview>,
     zoom: u32,
@@ -104,8 +98,10 @@ struct Menu {
     code_input: String,
     /// Update check / install, driven by a background thread.
     update: Arc<Mutex<UpdateState>>,
-    /// Tools, undo history and other drawing state.
-    studio: draw::Studio,
+    /// Pictures for the crosshair list, with the crosshair each shows.
+    thumbs: Vec<(Crosshair, Thumb)>,
+    /// The preset buttons, drawn once.
+    presets: Vec<(&'static str, Settings, Thumb)>,
 }
 
 #[derive(Clone)]
@@ -141,17 +137,17 @@ impl Menu {
             live_apply: true,
             selected,
             editing_right_click: false,
-            layer: 0,
-            drag_rest: Vec2::ZERO,
             status,
             preview: None,
-            zoom: 10,
+            zoom: 6,
             background: Background::Scene,
             image_input: String::new(),
             code_input: String::new(),
             update: Arc::new(Mutex::new(UpdateState::Idle)),
-            studio: draw::Studio::default(),
+            thumbs: Vec::new(),
+            presets: Vec::new(),
         };
+        apply_theme(ctx);
         menu.sync_image_input();
         if menu.cfg.auto_update && cfg!(windows) {
             menu.check_for_update(ctx);
@@ -188,13 +184,8 @@ impl Menu {
         self.sync_image_input();
     }
 
-    /// Call after switching which crosshair is edited: shows its image path
-    /// and selects its top layer.
     fn sync_image_input(&mut self) {
-        let ch = self.target();
-        let (image, top) = (ch.image.clone(), ch.layers.len().saturating_sub(1));
-        self.image_input = image;
-        self.layer = top;
+        self.image_input = self.target().image.clone();
     }
 
     fn set_status(&mut self, text: impl Into<String>, error: bool) {
@@ -456,27 +447,773 @@ const HAS_FILE_DIALOG: bool = cfg!(windows);
 impl eframe::App for Menu {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        ui.spacing_mut().slider_width = 160.0;
         self.handle_dropped_files(&ctx);
 
         self.update_banner(ui);
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status")
+            .frame(bar_frame())
+            .show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("profiles")
             .resizable(false)
-            .exact_size(190.0)
+            .exact_size(210.0)
+            .frame(side_frame())
             .show(ui, |ui| self.profile_list(ui));
-        egui::Panel::right("inspector")
-            .resizable(true)
-            .default_size(330.0)
+        egui::Panel::right("preview")
+            .resizable(false)
+            .exact_size(360.0)
+            .frame(side_frame())
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
+                egui::ScrollArea::vertical().show(ui, |ui| self.preview_panel(ui));
             });
-        egui::CentralPanel::default().show(ui, |ui| self.canvas_area(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::BG).inner_margin(16))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.editor(ui));
+            });
 
-        self.shortcuts(&ctx);
         self.drop_hint(&ctx);
         self.autosave(&ctx);
     }
+}
+
+/// Valorant-style starting points. Picking one keeps your colour.
+fn presets() -> Vec<(&'static str, Settings)> {
+    let lines = |length, offset, thickness| Lines {
+        opacity: 1.0,
+        length,
+        vertical_length: length,
+        offset,
+        thickness,
+        ..Lines::INNER
+    };
+    let base = Settings {
+        outer_lines: Lines::HIDDEN,
+        ..Settings::default()
+    };
+    vec![
+        ("Default", Settings::default()),
+        (
+            "Dot",
+            Settings {
+                center_dot: true,
+                center_dot_thickness: 3,
+                inner_lines: Lines::HIDDEN,
+                ..base
+            },
+        ),
+        (
+            "Cross",
+            Settings {
+                inner_lines: lines(5, 0, 2),
+                ..base
+            },
+        ),
+        (
+            "Gap",
+            Settings {
+                inner_lines: lines(4, 3, 2),
+                ..base
+            },
+        ),
+        (
+            "Gap + dot",
+            Settings {
+                center_dot: true,
+                inner_lines: lines(4, 3, 2),
+                ..base
+            },
+        ),
+        (
+            "Thin",
+            Settings {
+                inner_lines: lines(5, 2, 1),
+                ..base
+            },
+        ),
+        (
+            "Wide",
+            Settings {
+                inner_lines: Lines {
+                    separate_vertical: true,
+                    vertical_length: 2,
+                    ..lines(9, 3, 2)
+                },
+                ..base
+            },
+        ),
+        (
+            "Big",
+            Settings {
+                inner_lines: lines(8, 4, 3),
+                outer_lines: Lines {
+                    opacity: 0.5,
+                    ..lines(3, 14, 2)
+                },
+                ..base
+            },
+        ),
+    ]
+}
+
+impl Menu {
+    // ---- Left: crosshair list ----------------------------------------------
+
+    fn profile_list(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("CROSSHAIRS")
+                .size(11.0)
+                .color(theme::MUTED)
+                .strong(),
+        );
+        ui.add_space(6.0);
+        let mut select = None;
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height() - 120.0)
+            .show(ui, |ui| {
+                for i in 0..self.cfg.crosshairs.len() {
+                    let thumb = self.thumbnail(ui.ctx(), i);
+                    let ch = &self.cfg.crosshairs[i];
+                    let selected = i == self.selected;
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
+                    let fill = if selected {
+                        theme::ACCENT_DIM
+                    } else if resp.hovered() {
+                        theme::CARD_HOVER
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let p = ui.painter();
+                    p.rect_filled(rect, 8.0, fill);
+                    if selected {
+                        p.rect_stroke(
+                            rect,
+                            8.0,
+                            Stroke::new(1.0, theme::ACCENT),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    let tile =
+                        Rect::from_min_size(rect.min + Vec2::new(6.0, 6.0), Vec2::splat(34.0));
+                    p.rect_filled(tile, 6.0, theme::TILE);
+                    paint_thumb(p, tile, &thumb, 1.0);
+                    p.text(
+                        Pos2::new(
+                            tile.right() + 10.0,
+                            rect.center().y - if ch.right_click.is_some() { 7.0 } else { 0.0 },
+                        ),
+                        egui::Align2::LEFT_CENTER,
+                        &ch.name,
+                        egui::FontId::proportional(14.0),
+                        theme::TEXT,
+                    );
+                    if ch.right_click.is_some() {
+                        p.text(
+                            Pos2::new(tile.right() + 10.0, rect.center().y + 9.0),
+                            egui::Align2::LEFT_CENTER,
+                            "+ right click",
+                            egui::FontId::proportional(11.0),
+                            theme::MUTED,
+                        );
+                    }
+                    if resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        select = Some(i);
+                    }
+                    ui.add_space(2.0);
+                }
+            });
+        if let Some(i) = select {
+            self.select(i);
+        }
+
+        ui.add_space(8.0);
+        let n = self.cfg.crosshairs.len();
+        if ui
+            .add_sized(
+                [ui.available_width(), 30.0],
+                accent_button("+  New crosshair"),
+            )
+            .clicked()
+        {
+            let name = self.unique_name("Crosshair");
+            self.cfg.crosshairs.push(Crosshair {
+                name,
+                ..Default::default()
+            });
+            self.select(n);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Duplicate").clicked() {
+                let mut copy = self.current().clone();
+                copy.name = self.unique_name(&copy.name);
+                self.cfg.crosshairs.insert(self.selected + 1, copy);
+                self.select(self.selected + 1);
+            }
+            if ui.add_enabled(n > 1, egui::Button::new("Delete")).clicked() {
+                self.cfg.crosshairs.remove(self.selected);
+                self.select(self.selected.saturating_sub(1));
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.selected > 0, egui::Button::new("Move up"))
+                .clicked()
+            {
+                self.cfg.crosshairs.swap(self.selected, self.selected - 1);
+                self.select(self.selected - 1);
+            }
+            if ui
+                .add_enabled(self.selected + 1 < n, egui::Button::new("Move down"))
+                .clicked()
+            {
+                self.cfg.crosshairs.swap(self.selected, self.selected + 1);
+                self.select(self.selected + 1);
+            }
+        });
+        ui.add_space(4.0);
+        if HAS_FILE_DIALOG
+            && ui
+                .add_sized(
+                    [ui.available_width(), 24.0],
+                    egui::Button::new("New from PNG..."),
+                )
+                .clicked()
+            && let Some(p) = pick_png()
+        {
+            self.new_from_png(&p);
+        }
+        ui.label(
+            RichText::new("Tip: drop a PNG on this window")
+                .small()
+                .color(theme::MUTED),
+        );
+    }
+
+    /// A small picture of crosshair `i`, redrawn only when it changes.
+    fn thumbnail(&mut self, ctx: &egui::Context, i: usize) -> Thumb {
+        let ch = &self.cfg.crosshairs[i];
+        if let Some((key, t)) = self.thumbs.get(i)
+            && key == ch
+        {
+            return t.clone();
+        }
+        let canvas = ch.render_or_shapes(&self.dir);
+        let t = Thumb {
+            texture: ctx.load_texture(
+                format!("thumb-{i}"),
+                to_color_image(&canvas),
+                TextureOptions::NEAREST,
+            ),
+            size: Vec2::new(canvas.width as f32, canvas.height as f32),
+        };
+        let entry = (ch.clone(), t.clone());
+        if i < self.thumbs.len() {
+            self.thumbs[i] = entry;
+        } else {
+            self.thumbs.push(entry);
+        }
+        t
+    }
+
+    // ---- Middle: settings ---------------------------------------------------
+
+    fn editor(&mut self, ui: &mut egui::Ui) {
+        ui.set_max_width(ui.available_width().min(720.0));
+        // Name and which crosshair is being edited.
+        let ch = self.current();
+        ui.add(
+            egui::TextEdit::singleline(&mut ch.name)
+                .font(egui::FontId::proportional(22.0))
+                .frame(egui::Frame::NONE)
+                .desired_width(f32::INFINITY)
+                .hint_text("Name"),
+        );
+        ui.add_space(6.0);
+        self.right_click_bar(ui);
+        ui.add_space(10.0);
+
+        let blocked = if self.target().uses_image() {
+            Some("This crosshair shows a PNG image. Remove it under Image to use these settings.")
+        } else {
+            None
+        };
+        if let Some(msg) = blocked {
+            notice(ui, msg);
+        }
+        if self.target().uses_shapes() {
+            card(ui, "Made with shapes", None, |ui| {
+                ui.label(
+                    RichText::new(
+                        "This crosshair was drawn with shapes in crosslay 0.3 or 0.4. It still \
+                         works as it is, but the settings below don't change it.",
+                    )
+                    .color(theme::MUTED),
+                );
+                ui.add_space(4.0);
+                if ui
+                    .add(accent_button("Use simple settings instead"))
+                    .on_hover_text("Replaces the shapes with the settings below")
+                    .clicked()
+                {
+                    self.target().layers.clear();
+                }
+            });
+        }
+        let editable = blocked.is_none() && !self.target().uses_shapes();
+        let ch = self.target();
+
+        ui.add_enabled_ui(editable, |ui| {
+            card(ui, "Color", None, |ui| {
+                swatches(ui, &mut ch.color);
+                ui.add_space(6.0);
+                row(ui, "Opacity", |ui| {
+                    ui.add(egui::Slider::new(&mut ch.opacity, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text("Opacity of the whole crosshair")
+                });
+            });
+
+            card(ui, "Outlines", Some(&mut ch.outlines), |ui| {
+                row(ui, "Opacity", |ui| {
+                    ui.add(opacity_slider(&mut ch.outline_opacity))
+                });
+                row(ui, "Thickness", |ui| {
+                    ui.add(px_slider(&mut ch.outline_thickness, 1..=6))
+                });
+                row(ui, "Color", |ui| color_edit(ui, &mut ch.outline_color));
+            });
+
+            card(ui, "Center dot", Some(&mut ch.center_dot), |ui| {
+                row(ui, "Opacity", |ui| {
+                    ui.add(opacity_slider(&mut ch.center_dot_opacity))
+                });
+                row(ui, "Size", |ui| {
+                    ui.add(px_slider(&mut ch.center_dot_thickness, 1..=6))
+                });
+            });
+
+            for (title, lines) in [
+                ("Inner lines", &mut ch.inner_lines),
+                ("Outer lines", &mut ch.outer_lines),
+            ] {
+                let mut show = lines.show;
+                card(ui, title, Some(&mut show), |ui| lines_editor(ui, lines));
+                lines.show = show;
+            }
+        });
+
+        // ---- Less common things, folded away ---------------------------------
+        ui.add_space(4.0);
+        fold(ui, "Valorant crosshair code", |ui| self.valorant_code(ui));
+        fold(ui, "Image", |ui| self.image_section(ui));
+        fold(ui, "Position on screen", |ui| {
+            let ch = self.target();
+            row(ui, "Move right", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut ch.offset_x)
+                        .range(-2000..=2000)
+                        .suffix(" px"),
+                )
+            });
+            row(ui, "Move down", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut ch.offset_y)
+                        .range(-2000..=2000)
+                        .suffix(" px"),
+                )
+            });
+            if ui.button("Back to the centre").clicked() {
+                ch.offset_x = 0;
+                ch.offset_y = 0;
+            }
+        });
+        fold(ui, "Settings & hotkeys", |ui| self.settings(ui));
+    }
+
+    fn valorant_code(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new(
+                "Paste a code from Valorant (Settings > Crosshair > Import) to copy its primary \
+                 crosshair (its ADS crosshair when editing the right-click crosshair), or copy \
+                 this crosshair as a code.",
+            )
+            .color(theme::MUTED),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.code_input)
+                    .hint_text("0;P;c;5;h;0;0l;4;0o;0;0a;1;0f;0;1b;0")
+                    .desired_width(300.0),
+            );
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(accent_button("Import")).clicked() || enter)
+                && !self.code_input.trim().is_empty()
+            {
+                let section = if self.editing_right_click() {
+                    crate::valorant::Section::Ads
+                } else {
+                    crate::valorant::Section::Primary
+                };
+                match crate::valorant::import(&self.code_input, section) {
+                    Ok(s) => {
+                        let ch = self.target();
+                        ch.set_settings(&s);
+                        ch.layers.clear();
+                        self.set_status("Imported the Valorant crosshair code", false);
+                    }
+                    Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
+                }
+            }
+            let can_copy = !self.target().uses_shapes();
+            if ui
+                .add_enabled(can_copy, egui::Button::new("Copy code"))
+                .on_hover_text("Copy this crosshair as a Valorant code")
+                .clicked()
+            {
+                let code = crate::valorant::export(&self.target().settings());
+                ui.ctx().copy_text(code.clone());
+                self.code_input = code;
+                self.set_status("Copied the Valorant code to the clipboard", false);
+            }
+        });
+    }
+
+    fn image_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Use your own PNG instead of the settings.").color(theme::MUTED));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if HAS_FILE_DIALOG
+                && ui.button("Choose PNG...").clicked()
+                && let Some(p) = pick_png()
+            {
+                self.set_image(&p);
+            }
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.image_input)
+                    .hint_text("path to a .png file")
+                    .desired_width(240.0),
+            );
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Load").clicked() || enter) && !self.image_input.trim().is_empty() {
+                let raw = PathBuf::from(self.image_input.trim());
+                let p = if raw.is_absolute() {
+                    raw
+                } else {
+                    self.dir.join(raw)
+                };
+                self.set_image(&p);
+            }
+            if self.target().uses_image() && ui.button("Remove").clicked() {
+                self.target().image.clear();
+                self.image_input.clear();
+            }
+        });
+        let ch = self.target();
+        if ch.uses_image() {
+            row(ui, "Scale", |ui| {
+                ui.add(
+                    egui::Slider::new(&mut ch.image_scale, 0.1..=8.0)
+                        .logarithmic(true)
+                        .suffix("×"),
+                )
+            });
+        }
+    }
+
+    /// Normal / right mouse held tabs, or a button to add a right-click
+    /// crosshair.
+    fn right_click_bar(&mut self, ui: &mut egui::Ui) {
+        let has = self.current().right_click.is_some();
+        ui.horizontal(|ui| {
+            let mut alt = self.editing_right_click && has;
+            if tab(ui, !alt, "Normal").clicked() {
+                alt = false;
+            }
+            if has {
+                if tab(ui, alt, "Right mouse held")
+                    .on_hover_text(match self.cfg.right_click {
+                        RightClickMode::Hold => "Shown while the right mouse button is held",
+                        RightClickMode::Toggle => "Each right click switches to it and back",
+                    })
+                    .clicked()
+                {
+                    alt = true;
+                }
+                if alt != self.editing_right_click {
+                    self.editing_right_click = alt;
+                    self.sync_image_input();
+                }
+                ui.add_space(8.0);
+                if ui
+                    .small_button("Copy from normal")
+                    .on_hover_text("Make the right-click crosshair the same as the normal one")
+                    .clicked()
+                {
+                    let copy = self.current().right_click_template();
+                    self.current().right_click = Some(Box::new(copy));
+                    self.sync_image_input();
+                }
+                if ui.small_button("Remove").clicked() {
+                    self.current().right_click = None;
+                    self.editing_right_click = false;
+                    self.sync_image_input();
+                }
+            } else if ui
+                .small_button("+ Right-click crosshair")
+                .on_hover_text(
+                    "Show a different crosshair while the right mouse button is held, e.g. when \
+                     aiming down sights. Without one, the overlay doesn't watch the mouse at all.",
+                )
+                .clicked()
+            {
+                let copy = self.current().right_click_template();
+                self.current().right_click = Some(Box::new(copy));
+                self.editing_right_click = true;
+                self.sync_image_input();
+            }
+        });
+    }
+
+    // ---- Right: preview and presets -----------------------------------------
+
+    fn preview_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("PREVIEW")
+                .size(11.0)
+                .color(theme::MUTED)
+                .strong(),
+        );
+        ui.add_space(6.0);
+
+        self.update_preview(ui.ctx());
+        let side = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(side, side * 0.8), Sense::hover());
+        let painter = ui.painter_at(rect);
+        paint_background(&painter, rect, self.background);
+        if let Some(p) = &self.preview
+            && let Some(tex) = &p.texture
+        {
+            // 1× = real on-screen size, regardless of the editor's UI scaling.
+            let px = self.zoom as f32 / ui.ctx().pixels_per_point();
+            let center = rect.center();
+            let min = Pos2::new(
+                center.x - (p.anchor.0 as f32 + 0.5) * px,
+                center.y - (p.anchor.1 as f32 + 0.5) * px,
+            );
+            let r =
+                Rect::from_min_size(min, Vec2::new(p.size[0] as f32 * px, p.size[1] as f32 * px));
+            painter.image(
+                tex.id(),
+                r,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        painter.rect_stroke(
+            rect,
+            10.0,
+            Stroke::new(1.0, theme::BORDER),
+            StrokeKind::Inside,
+        );
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 150.0;
+            ui.label(RichText::new("Zoom").color(theme::MUTED));
+            ui.add(egui::Slider::new(&mut self.zoom, 1..=16).suffix("×"))
+                .on_hover_text("1× is the real size on screen");
+        });
+        ui.horizontal(|ui| {
+            for (bg, label) in [
+                (Background::Scene, "Scene"),
+                (Background::Dark, "Dark"),
+                (Background::Light, "Light"),
+                (Background::Checker, "Checker"),
+            ] {
+                if tab(ui, self.background == bg, label).clicked() {
+                    self.background = bg;
+                }
+            }
+        });
+        if let Some(p) = &self.preview {
+            let info = match &p.error {
+                Some(e) => RichText::new(format!("Image error: {e}")).color(theme::ERROR),
+                None => {
+                    RichText::new(format!("{} × {} px", p.size[0], p.size[1])).color(theme::MUTED)
+                }
+            };
+            ui.label(info.small());
+        }
+
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new("PRESETS")
+                .size(11.0)
+                .color(theme::MUTED)
+                .strong(),
+        );
+        ui.label(
+            RichText::new("Click one to start from it. Your colour stays.")
+                .small()
+                .color(theme::MUTED),
+        );
+        ui.add_space(6.0);
+        self.preset_grid(ui);
+    }
+
+    fn preset_grid(&mut self, ui: &mut egui::Ui) {
+        if self.presets.is_empty() {
+            for (name, s) in presets() {
+                let canvas = crate::layer::render(&s.to_layers());
+                let t = Thumb {
+                    texture: ui.ctx().load_texture(
+                        format!("preset-{name}"),
+                        to_color_image(&canvas),
+                        TextureOptions::NEAREST,
+                    ),
+                    size: Vec2::new(canvas.width as f32, canvas.height as f32),
+                };
+                self.presets.push((name, s, t));
+            }
+        }
+        let editable = !self.target().uses_image();
+        let cols = 4;
+        let gap = 6.0;
+        let w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+        let mut picked = None;
+        for row_items in self.presets.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (name, s, t) in row_items {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(w, w + 14.0), Sense::click());
+                    let p = ui.painter();
+                    let tile = Rect::from_min_size(rect.min, Vec2::splat(w));
+                    p.rect_filled(
+                        tile,
+                        8.0,
+                        if resp.hovered() {
+                            theme::CARD_HOVER
+                        } else {
+                            theme::TILE
+                        },
+                    );
+                    if resp.hovered() {
+                        p.rect_stroke(
+                            tile,
+                            8.0,
+                            Stroke::new(1.0, theme::ACCENT),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    paint_thumb(p, tile, t, 2.0);
+                    p.text(
+                        Pos2::new(rect.center().x, rect.bottom()),
+                        egui::Align2::CENTER_BOTTOM,
+                        *name,
+                        egui::FontId::proportional(11.0),
+                        theme::MUTED,
+                    );
+                    if editable
+                        && resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                    {
+                        picked = Some(*s);
+                    }
+                }
+            });
+            ui.add_space(gap);
+        }
+        if let Some(mut s) = picked {
+            let ch = self.target();
+            s.color = ch.color;
+            s.outline_color = ch.outline_color;
+            ch.set_settings(&s);
+            ch.layers.clear();
+        }
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let dirty = self.cfg != self.saved;
+            if toggle(ui, &mut self.live_apply)
+                .on_hover_text(
+                    "Save every change right away, so the overlay updates while you edit",
+                )
+                .changed()
+                && self.live_apply
+            {
+                self.changed_at = Some(Instant::now() - SAVE_DELAY);
+            }
+            ui.label("Live apply");
+            if !self.live_apply {
+                if ui.add_enabled(dirty, accent_button("Save")).clicked() {
+                    self.save();
+                }
+                if ui
+                    .button("Revert")
+                    .on_hover_text("Reload config.toml from disk")
+                    .clicked()
+                {
+                    self.revert();
+                }
+            }
+            ui.separator();
+            #[cfg(windows)]
+            {
+                if crate::win::overlay_running() {
+                    ui.label(RichText::new("Overlay running").color(theme::ACCENT));
+                } else if ui
+                    .button("Start overlay")
+                    .on_hover_text("Runs crosslay.exe from the editor's folder")
+                    .clicked()
+                {
+                    self.start_overlay();
+                }
+                ui.separator();
+            }
+            let color = if self.status.error {
+                theme::ERROR
+            } else if dirty && !self.live_apply {
+                theme::WARN
+            } else {
+                theme::MUTED
+            };
+            let text = if dirty && !self.live_apply && !self.status.error {
+                "Unsaved changes".to_string()
+            } else {
+                self.status.text.clone()
+            };
+            ui.label(RichText::new(text).color(color));
+        });
+    }
+}
+
+/// A cached crosshair picture.
+#[derive(Clone)]
+struct Thumb {
+    texture: TextureHandle,
+    size: Vec2,
+}
+
+/// Draw `t` centred in `tile`, at `scale` real pixels per crosshair pixel
+/// (smaller if it wouldn't fit).
+fn paint_thumb(p: &egui::Painter, tile: Rect, t: &Thumb, scale: f32) {
+    let fit = ((tile.width() - 6.0) / t.size.x).min((tile.height() - 6.0) / t.size.y);
+    let s = scale.min(fit).max(0.1);
+    p.image(
+        t.texture.id(),
+        Rect::from_center_size(tile.center(), t.size * s),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 impl Menu {
@@ -513,7 +1250,6 @@ impl Menu {
     }
 
     fn autosave(&mut self, ctx: &egui::Context) {
-        self.track_history(ctx);
         if self.cfg != self.prev {
             self.prev = self.cfg.clone();
             self.changed_at = Some(Instant::now());
@@ -532,352 +1268,6 @@ impl Menu {
                 ctx.request_repaint_after(SAVE_DELAY - elapsed);
             }
         }
-    }
-
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let dirty = self.cfg != self.saved;
-            if ui
-                .checkbox(&mut self.live_apply, "Live apply")
-                .on_hover_text(
-                    "Save every change right away, so the overlay updates while you edit",
-                )
-                .changed()
-                && self.live_apply
-            {
-                self.changed_at = Some(Instant::now() - SAVE_DELAY);
-            }
-            if ui.add_enabled(dirty, egui::Button::new("Save")).clicked() {
-                self.save();
-            }
-            if ui
-                .button("Revert")
-                .on_hover_text("Reload config.toml from disk")
-                .clicked()
-            {
-                self.revert();
-            }
-            ui.separator();
-            #[cfg(windows)]
-            {
-                if crate::win::overlay_running() {
-                    ui.label(
-                        RichText::new("Overlay running").color(Color32::from_rgb(80, 200, 120)),
-                    );
-                } else if ui
-                    .button("Start overlay")
-                    .on_hover_text("Runs crosslay.exe from the editor's folder")
-                    .clicked()
-                {
-                    self.start_overlay();
-                }
-                ui.separator();
-            }
-            let color = if self.status.error {
-                ui.visuals().error_fg_color
-            } else if dirty && !self.live_apply {
-                ui.visuals().warn_fg_color
-            } else {
-                ui.visuals().weak_text_color()
-            };
-            let text = if dirty && !self.live_apply && !self.status.error {
-                "Unsaved changes".to_string()
-            } else {
-                self.status.text.clone()
-            };
-            ui.label(RichText::new(text).color(color));
-        });
-    }
-
-    fn profile_list(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading("Crosshairs");
-        ui.add_space(4.0);
-        let mut select = None;
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - 110.0)
-            .show(ui, |ui| {
-                for (i, ch) in self.cfg.crosshairs.iter().enumerate() {
-                    let mut label = ch.name.clone();
-                    if ch.uses_image() {
-                        label.push_str("  (image)");
-                    }
-                    if ch.right_click.is_some() {
-                        label.push_str("  + right click");
-                    }
-                    let resp = ui.add_sized(
-                        [ui.available_width(), 24.0],
-                        egui::Button::selectable(i == self.selected, label),
-                    );
-                    if resp.clicked() {
-                        select = Some(i);
-                    }
-                }
-            });
-        if let Some(i) = select {
-            self.select(i);
-        }
-
-        ui.separator();
-        let n = self.cfg.crosshairs.len();
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ New").clicked() {
-                let name = self.unique_name("Crosshair");
-                self.cfg.crosshairs.push(Crosshair {
-                    name,
-                    ..Default::default()
-                });
-                self.select(n);
-            }
-            if ui.button("Duplicate").clicked() {
-                let mut copy = self.current().clone();
-                copy.name = self.unique_name(&copy.name);
-                self.cfg.crosshairs.insert(self.selected + 1, copy);
-                self.select(self.selected + 1);
-            }
-            if ui.add_enabled(n > 1, egui::Button::new("Delete")).clicked() {
-                self.cfg.crosshairs.remove(self.selected);
-                self.select(self.selected.saturating_sub(1));
-            }
-            if ui
-                .add_enabled(self.selected > 0, egui::Button::new("Up"))
-                .on_hover_text("Move up")
-                .clicked()
-            {
-                self.cfg.crosshairs.swap(self.selected, self.selected - 1);
-                self.select(self.selected - 1);
-            }
-            if ui
-                .add_enabled(self.selected + 1 < n, egui::Button::new("Down"))
-                .on_hover_text("Move down")
-                .clicked()
-            {
-                self.cfg.crosshairs.swap(self.selected, self.selected + 1);
-                self.select(self.selected + 1);
-            }
-        });
-        if HAS_FILE_DIALOG
-            && ui.button("+ New from PNG...").clicked()
-            && let Some(p) = pick_png()
-        {
-            self.new_from_png(&p);
-        }
-        ui.label(
-            RichText::new("Tip: drop a PNG anywhere on this window")
-                .small()
-                .weak(),
-        );
-    }
-
-    /// Valorant codes, PNG crosshairs and placement on screen.
-    fn more_sections(&mut self, ui: &mut egui::Ui) {
-        // ---- Valorant code -----------------------------------------------
-        section(ui, "Valorant crosshair code", |ui| {
-            ui.label(
-                RichText::new(
-                    "Paste a code from Valorant (Settings > Crosshair > Import) to turn its \
-                     primary crosshair (its ADS crosshair when editing the right-click \
-                     crosshair) into shapes. This replaces the shapes above.",
-                )
-                .weak(),
-            );
-            ui.horizontal(|ui| {
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.code_input)
-                        .hint_text("0;P;c;5;h;0;0l;4;0o;0;0a;1;0f;0;1b;0")
-                        .desired_width(300.0),
-                );
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Import").clicked() || enter) && !self.code_input.trim().is_empty() {
-                    let section = if self.editing_right_click() {
-                        crate::valorant::Section::Ads
-                    } else {
-                        crate::valorant::Section::Primary
-                    };
-                    match crate::valorant::import(&self.code_input, section) {
-                        Ok(settings) => {
-                            self.target().layers = settings.to_layers();
-                            self.sync_image_input();
-                            self.set_status("Imported the Valorant crosshair code", false);
-                        }
-                        Err(e) => self.set_status(format!("Couldn't import: {e}"), true),
-                    }
-                }
-                let exported = crate::valorant::Settings::from_layers(&self.target().layers);
-                let hint = match &exported {
-                    Ok(_) => "Copy this crosshair as a Valorant code".to_string(),
-                    Err(e) => format!("Valorant can't show this crosshair: {e}"),
-                };
-                if ui
-                    .add_enabled(exported.is_ok(), egui::Button::new("Copy code"))
-                    .on_hover_text(&hint)
-                    .on_disabled_hover_text(&hint)
-                    .clicked()
-                    && let Ok(settings) = exported
-                {
-                    let code = crate::valorant::export(&settings);
-                    ui.ctx().copy_text(code.clone());
-                    self.code_input = code;
-                    self.set_status("Copied the Valorant code to the clipboard", false);
-                }
-            });
-        });
-
-        // ---- Image -------------------------------------------------------
-        section(ui, "Image", |ui| {
-            ui.label(RichText::new("Use your own PNG instead of the shapes.").weak());
-            ui.horizontal(|ui| {
-                if HAS_FILE_DIALOG
-                    && ui.button("Choose PNG...").clicked()
-                    && let Some(p) = pick_png()
-                {
-                    self.set_image(&p);
-                }
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.image_input)
-                        .hint_text("path to a .png file")
-                        .desired_width(260.0),
-                );
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Load").clicked() || enter) && !self.image_input.trim().is_empty() {
-                    let raw = PathBuf::from(self.image_input.trim());
-                    let p = if raw.is_absolute() {
-                        raw
-                    } else {
-                        self.dir.join(raw)
-                    };
-                    self.set_image(&p);
-                }
-                if self.target().uses_image() && ui.button("Remove").clicked() {
-                    self.target().image.clear();
-                    self.image_input.clear();
-                }
-            });
-            let ch = self.target();
-            if ch.uses_image() {
-                grid(ui, "image_grid", |ui| {
-                    ui.label("Scale");
-                    ui.add(
-                        egui::Slider::new(&mut ch.image_scale, 0.1..=8.0)
-                            .logarithmic(true)
-                            .suffix("×"),
-                    );
-                    ui.end_row();
-                });
-            }
-        });
-
-        let ch = self.target();
-        // ---- Common ------------------------------------------------------
-        section(ui, "Position on screen", |ui| {
-            grid(ui, "common_grid", |ui| {
-                ui.label("Opacity");
-                ui.add(egui::Slider::new(&mut ch.opacity, 0.0..=1.0).fixed_decimals(2));
-                ui.end_row();
-                ui.label("Offset X");
-                ui.add(
-                    egui::DragValue::new(&mut ch.offset_x)
-                        .range(-2000..=2000)
-                        .suffix(" px"),
-                );
-                ui.end_row();
-                ui.label("Offset Y");
-                ui.add(
-                    egui::DragValue::new(&mut ch.offset_y)
-                        .range(-2000..=2000)
-                        .suffix(" px"),
-                );
-                ui.end_row();
-                ui.label("");
-                if ui.button("Reset offset").clicked() {
-                    ch.offset_x = 0;
-                    ch.offset_y = 0;
-                }
-                ui.end_row();
-            });
-        });
-    }
-
-    /// Buttons to add shapes, and the list of layers, top first.
-    fn layer_list(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("+ Add shape", |ui| {
-            for kind in Kind::ALL {
-                if ui
-                    .button(kind.label())
-                    .on_hover_text(kind_hint(kind))
-                    .clicked()
-                {
-                    let l = self.new_shape(kind);
-                    self.push_shape(l);
-                    ui.close();
-                }
-            }
-        })
-        .response
-        .on_hover_text("Or draw one on the canvas");
-        ui.add_space(4.0);
-
-        let sel = self.layer;
-        let layers = &mut self.target().layers;
-        let n = layers.len();
-        if n == 0 {
-            ui.label(
-                RichText::new("No shapes yet. Draw one on the canvas or pick a starter.").weak(),
-            );
-            return;
-        }
-        let mut select = None;
-        for i in (0..n).rev() {
-            let l = &mut layers[i];
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut l.visible, "")
-                    .on_hover_text("Show this shape");
-                let mut text =
-                    RichText::new(format!("{}  ({})", l.name, l.shape.label().to_lowercase()));
-                if !l.visible {
-                    text = text.weak();
-                }
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 22.0],
-                        egui::Button::selectable(i == sel, text),
-                    )
-                    .clicked()
-                {
-                    select = Some(i);
-                }
-            });
-        }
-        let mut sel = select.unwrap_or(sel).min(n - 1);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(sel + 1 < n, egui::Button::new("Move up"))
-                .on_hover_text("Draw it above the shape over it")
-                .clicked()
-            {
-                layers.swap(sel, sel + 1);
-                sel += 1;
-            }
-            if ui
-                .add_enabled(sel > 0, egui::Button::new("Move down"))
-                .on_hover_text("Draw it below the shape under it")
-                .clicked()
-            {
-                layers.swap(sel, sel - 1);
-                sel -= 1;
-            }
-            if ui.button("Duplicate").clicked() {
-                let mut copy = layers[sel].clone();
-                copy.name = unique_layer_name(layers, &copy.name);
-                layers.insert(sel + 1, copy);
-                sel += 1;
-            }
-            if ui.button("Delete").clicked() {
-                layers.remove(sel);
-                sel = sel.saturating_sub(1);
-            }
-        });
-        self.layer = sel;
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
@@ -1055,24 +1445,250 @@ fn paint_background(painter: &egui::Painter, rect: Rect, bg: Background) {
     }
 }
 
-fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::group(ui.style())
-        .inner_margin(10.0)
+// ---- Look and feel ----------------------------------------------------------
+
+mod theme {
+    use eframe::egui::Color32;
+
+    pub const BG: Color32 = Color32::from_rgb(17, 19, 24);
+    pub const SIDE: Color32 = Color32::from_rgb(22, 25, 31);
+    pub const CARD: Color32 = Color32::from_rgb(28, 32, 40);
+    pub const CARD_HOVER: Color32 = Color32::from_rgb(36, 41, 51);
+    pub const TILE: Color32 = Color32::from_rgb(12, 14, 18);
+    pub const WIDGET: Color32 = Color32::from_rgb(40, 45, 56);
+    pub const WIDGET_HOVER: Color32 = Color32::from_rgb(52, 58, 72);
+    pub const BORDER: Color32 = Color32::from_rgb(44, 49, 60);
+    pub const TEXT: Color32 = Color32::from_rgb(230, 233, 239);
+    pub const MUTED: Color32 = Color32::from_rgb(140, 147, 160);
+    pub const ACCENT: Color32 = Color32::from_rgb(255, 82, 99);
+    pub const ACCENT_DIM: Color32 = Color32::from_rgb(58, 30, 38);
+    pub const ERROR: Color32 = Color32::from_rgb(255, 99, 99);
+    pub const WARN: Color32 = Color32::from_rgb(240, 190, 80);
+}
+
+fn apply_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = theme::BG;
+    v.window_fill = theme::CARD;
+    v.window_stroke = Stroke::new(1.0, theme::BORDER);
+    v.window_corner_radius = 10.into();
+    v.menu_corner_radius = 8.into();
+    v.extreme_bg_color = theme::TILE;
+    v.faint_bg_color = theme::CARD;
+    v.override_text_color = Some(theme::TEXT);
+    v.hyperlink_color = theme::ACCENT;
+    v.error_fg_color = theme::ERROR;
+    v.warn_fg_color = theme::WARN;
+    v.selection.bg_fill = theme::ACCENT;
+    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.slider_trailing_fill = true;
+    v.handle_shape = egui::style::HandleShape::Circle;
+    let w = &mut v.widgets;
+    for (state, fill) in [
+        (&mut w.inactive, theme::WIDGET),
+        (&mut w.hovered, theme::WIDGET_HOVER),
+        (&mut w.active, theme::WIDGET_HOVER),
+        (&mut w.open, theme::WIDGET_HOVER),
+    ] {
+        state.bg_fill = fill;
+        state.weak_bg_fill = fill;
+        state.corner_radius = 6.into();
+        state.bg_stroke = Stroke::NONE;
+        state.expansion = 0.0;
+    }
+    w.noninteractive.corner_radius = 6.into();
+    w.noninteractive.bg_stroke = Stroke::new(1.0, theme::BORDER);
+    w.inactive.fg_stroke = Stroke::new(1.0, theme::TEXT);
+    w.hovered.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    w.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    ctx.set_visuals(v);
+    ctx.all_styles_mut(|s| {
+        s.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        s.spacing.button_padding = Vec2::new(10.0, 5.0);
+        s.spacing.interact_size.y = 24.0;
+        s.spacing.slider_width = 220.0;
+        s.spacing.slider_rail_height = 4.0;
+        s.text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        s.text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+    });
+}
+
+fn bar_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::SIDE)
+        .inner_margin(egui::Margin::symmetric(14, 8))
+        .stroke(Stroke::new(1.0, theme::BORDER))
+}
+
+fn side_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::SIDE)
+        .inner_margin(14)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+}
+
+/// A rounded group of settings, with an on/off switch in the header when
+/// `enabled` is given.
+fn card(
+    ui: &mut egui::Ui,
+    title: &str,
+    enabled: Option<&mut bool>,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    let on = enabled.as_ref().is_none_or(|e| **e);
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).strong().size(15.0));
-            ui.add_space(4.0);
-            body(ui);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).size(15.0).strong());
+                if let Some(e) = enabled {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        toggle(ui, e);
+                    });
+                }
+            });
+            if on {
+                ui.add_space(4.0);
+                body(ui);
+            }
+        });
+    ui.add_space(10.0);
+}
+
+/// A labelled row inside a card.
+fn row(ui: &mut egui::Ui, label: &str, widget: impl FnOnce(&mut egui::Ui) -> egui::Response) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, 24.0), Sense::hover());
+        ui.painter().text(
+            Pos2::new(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(14.0),
+            if ui.is_enabled() {
+                theme::MUTED
+            } else {
+                theme::MUTED.gamma_multiply(0.5)
+            },
+        );
+        widget(ui);
+    });
+}
+
+/// A section that starts folded away.
+fn fold(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::CollapsingHeader::new(RichText::new(title).size(15.0).strong())
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    body(ui);
+                });
         });
     ui.add_space(8.0);
 }
 
-fn grid(ui: &mut egui::Ui, id: &str, body: impl FnOnce(&mut egui::Ui)) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .min_col_width(110.0)
-        .show(ui, body);
+/// A pill-shaped choice.
+fn tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    let text = RichText::new(label).color(if selected {
+        Color32::WHITE
+    } else {
+        theme::MUTED
+    });
+    let button = egui::Button::new(text)
+        .fill(if selected {
+            theme::ACCENT
+        } else {
+            theme::WIDGET
+        })
+        .corner_radius(12);
+    ui.add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// An on/off switch.
+fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let size = Vec2::new(36.0, 20.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let off_fill = if resp.hovered() {
+        theme::WIDGET_HOVER
+    } else {
+        theme::WIDGET
+    };
+    let fill = lerp_color(off_fill, theme::ACCENT, t);
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, fill);
+    let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
+    p.circle_filled(Pos2::new(x, rect.center().y), 7.0, Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// Valorant's colours as round swatches, plus a custom colour picker.
+fn swatches(ui: &mut egui::Ui, c: &mut Color) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for swatch in crate::valorant::PALETTE {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+            let selected = c.r == swatch.r && c.g == swatch.g && c.b == swatch.b;
+            let p = ui.painter();
+            if selected {
+                p.circle_stroke(rect.center(), 13.5, Stroke::new(2.0, Color32::WHITE));
+            } else if resp.hovered() {
+                p.circle_stroke(rect.center(), 13.5, Stroke::new(1.0, theme::MUTED));
+            }
+            p.circle_filled(
+                rect.center(),
+                10.0,
+                Color32::from_rgb(swatch.r, swatch.g, swatch.b),
+            );
+            if resp
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                *c = Color::rgba(swatch.r, swatch.g, swatch.b, c.a);
+            }
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Custom").color(theme::MUTED));
+        color_edit(ui, c);
+    });
+}
+
+fn notice(ui: &mut egui::Ui, msg: &str) {
+    egui::Frame::new()
+        .fill(theme::ACCENT_DIM)
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(msg);
+        });
+    ui.add_space(10.0);
+}
+
+fn accent_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
+        .fill(theme::ACCENT)
+        .corner_radius(6)
 }
 
 fn color_edit(ui: &mut egui::Ui, c: &mut Color) -> egui::Response {
@@ -1090,213 +1706,46 @@ fn color_edit(ui: &mut egui::Ui, c: &mut Color) -> egui::Response {
 }
 
 fn opacity_slider(v: &mut f32) -> egui::Slider<'_> {
-    egui::Slider::new(v, 0.0..=1.0).fixed_decimals(3)
+    egui::Slider::new(v, 0.0..=1.0).fixed_decimals(2)
 }
 
-fn kind_hint(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Cross => "Four lines around a centre, like Valorant's inner and outer lines",
-        Kind::Line => "A single line; rotate it or repeat it around the centre",
-        Kind::Rect => "A rectangle; a small square makes a dot",
-        Kind::Circle => "A filled circle",
-        Kind::Ring => "A circle outline",
-        Kind::Arc => "Part of a ring",
-        Kind::Triangle => "A triangle, pointing up before rotation",
-    }
+fn px_slider(v: &mut u32, range: std::ops::RangeInclusive<u32>) -> egui::Slider<'_> {
+    egui::Slider::new(v, range).suffix(" px")
 }
 
-/// `base`, or `base 2`, `base 3`... whichever no layer uses yet.
-fn unique_layer_name(layers: &[Layer], base: &str) -> String {
-    let base = base
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .trim_end();
-    let base = if base.is_empty() { "Shape" } else { base };
-    let taken = |n: &str| layers.iter().any(|l| l.name == n);
-    if !taken(base) {
-        return base.to_string();
-    }
-    (2..)
-        .map(|i| format!("{base} {i}"))
-        .find(|n| !taken(n))
-        .unwrap()
-}
-
-/// A size slider in half pixels. Typing a bigger value than the slider
-/// shows is allowed.
-fn size_slider(v: &mut f32, max: f32) -> egui::Slider<'_> {
-    egui::Slider::new(v, 0.0..=max)
-        .step_by(0.5)
-        .max_decimals(1)
-        .clamping(egui::SliderClamping::Never)
-        .suffix(" px")
-}
-
-/// Controls for one layer.
-fn layer_editor(ui: &mut egui::Ui, l: &mut Layer) {
-    ui.spacing_mut().slider_width = 130.0;
-    grid(ui, "layer_grid", |ui| {
-        ui.label("Name");
-        ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(200.0));
-        ui.end_row();
-
-        ui.label("Shape");
-        egui::ComboBox::from_id_salt("layer_shape")
-            .selected_text(l.shape.label())
-            .show_ui(ui, |ui| {
-                for k in Kind::ALL {
-                    ui.selectable_value(&mut l.shape, k, k.label())
-                        .on_hover_text(kind_hint(k));
-                }
-            });
-        ui.end_row();
-
-        let size = |ui: &mut egui::Ui, label: &str, v: &mut f32, max: f32, hint: &str| {
-            ui.label(label);
-            let r = ui.add(size_slider(v, max));
-            if !hint.is_empty() {
-                r.on_hover_text(hint);
-            }
-            ui.end_row();
-        };
-        match l.shape {
-            Kind::Cross => {
-                size(
-                    ui,
-                    "Horizontal length",
-                    &mut l.width,
-                    40.0,
-                    "Left and right lines",
-                );
-                size(
-                    ui,
-                    "Vertical length",
-                    &mut l.height,
-                    40.0,
-                    "Top and bottom lines",
-                );
-                size(ui, "Thickness", &mut l.thickness, 10.0, "");
-                size(
-                    ui,
-                    "Gap",
-                    &mut l.gap,
-                    40.0,
-                    "Space between the centre and the lines. At 0 they join into a solid cross.",
-                );
-            }
-            Kind::Line => {
-                size(ui, "Length", &mut l.width, 60.0, "");
-                size(ui, "Thickness", &mut l.thickness, 10.0, "");
-            }
-            Kind::Rect | Kind::Triangle => {
-                size(ui, "Width", &mut l.width, 40.0, "");
-                size(ui, "Height", &mut l.height, 40.0, "");
-            }
-            Kind::Circle => size(ui, "Diameter", &mut l.width, 60.0, ""),
-            Kind::Ring | Kind::Arc => {
-                size(
-                    ui,
-                    "Diameter",
-                    &mut l.width,
-                    100.0,
-                    "Outer edge to outer edge",
-                );
-                size(ui, "Thickness", &mut l.thickness, 10.0, "");
-                if l.shape == Kind::Arc {
-                    ui.label("Sweep");
-                    ui.add(
-                        egui::Slider::new(&mut l.sweep, 0.0..=360.0)
-                            .step_by(1.0)
-                            .suffix("°"),
-                    )
-                    .on_hover_text("How much of the circle the arc covers");
-                    ui.end_row();
-                }
-            }
-        }
-
-        ui.label("Position");
-        ui.horizontal(|ui| {
-            for (axis, v) in [("X", &mut l.x), ("Y", &mut l.y)] {
-                ui.label(axis);
-                ui.add(
-                    egui::DragValue::new(v)
-                        .speed(0.25)
-                        .range(-500.0..=500.0)
-                        .max_decimals(1)
-                        .suffix(" px"),
-                );
-            }
-            if ui
-                .button("Center")
-                .on_hover_text("Put it on the screen centre")
-                .clicked()
-            {
-                l.x = 0.0;
-                l.y = 0.0;
-            }
-        })
-        .response
-        .on_hover_text("From the screen centre; Y grows downwards. Drag in the preview too.");
-        ui.end_row();
-
-        if l.shape.rotates() {
-            ui.label("Rotation");
-            ui.add(
-                egui::Slider::new(&mut l.rotation, -180.0..=180.0)
-                    .step_by(1.0)
-                    .clamping(egui::SliderClamping::Never)
-                    .suffix("°"),
-            )
-            .on_hover_text("Clockwise");
-            ui.end_row();
-        }
-
-        ui.label("Repeat");
-        ui.add(egui::Slider::new(&mut l.copies, 1..=crate::layer::MAX_COPIES).suffix("×"))
-            .on_hover_text(
-                "Copies spread evenly around the screen centre: 4 turns one line into a cross",
-            );
-        ui.end_row();
-
-        ui.label("Mirror");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut l.mirror_x, "Left-right")
-                .on_hover_text("Also draw it flipped across the centre, left to right");
-            ui.checkbox(&mut l.mirror_y, "Up-down")
-                .on_hover_text("Also draw it flipped across the centre, top to bottom");
-        });
-        ui.end_row();
-
-        ui.label("Color");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = 90.0;
-            color_edit(ui, &mut l.color);
-            ui.add(opacity_slider(&mut l.opacity));
-        });
-        ui.end_row();
-
-        ui.label("Outline");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = 90.0;
-            ui.add(
-                egui::Slider::new(&mut l.outline, 0.0..=6.0)
-                    .step_by(0.5)
-                    .max_decimals(1)
-                    .clamping(egui::SliderClamping::Never)
-                    .suffix(" px"),
-            )
-            .on_hover_text("0 = no outline. Outlines sit behind every shape.");
-            ui.add_enabled_ui(l.outline > 0.0, |ui| {
-                color_edit(ui, &mut l.outline_color);
-                ui.add(opacity_slider(&mut l.outline_opacity));
-            });
-        });
-        ui.end_row();
-
-        ui.label("Smooth edges");
-        ui.checkbox(&mut l.smooth, "").on_hover_text(
-            "Anti-aliasing. Off keeps every pixel sharp, which suits straight lines.",
-        );
-        ui.end_row();
+/// Controls for one set of lines, laid out like Valorant's menu.
+fn lines_editor(ui: &mut egui::Ui, l: &mut Lines) {
+    row(ui, "Opacity", |ui| ui.add(opacity_slider(&mut l.opacity)));
+    row(ui, "Length", |ui| {
+        ui.add(px_slider(&mut l.length, 0..=40))
+            .on_hover_text("Left and right lines")
     });
+    row(ui, "Vertical length", |ui| {
+        let resp = ui
+            .checkbox(&mut l.separate_vertical, "Separate")
+            .on_hover_text("Set the top and bottom lines' length on its own");
+        if resp.changed() && l.separate_vertical {
+            l.vertical_length = l.length;
+        }
+        if l.separate_vertical {
+            ui.add(px_slider(&mut l.vertical_length, 0..=40))
+        } else {
+            ui.label(RichText::new("same as length").color(theme::MUTED))
+        }
+    });
+    row(ui, "Thickness", |ui| {
+        ui.add(px_slider(&mut l.thickness, 0..=10))
+    });
+    row(ui, "Offset", |ui| {
+        ui.add(px_slider(&mut l.offset, 0..=40))
+            .on_hover_text("Gap from the centre. At 0 the lines meet in a solid cross.")
+    });
+}
+
+fn grid(ui: &mut egui::Ui, id: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .min_col_width(120.0)
+        .show(ui, body);
 }
