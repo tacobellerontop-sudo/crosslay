@@ -491,6 +491,72 @@ mod tests {
         assert_eq!(export(&d), "0;P");
     }
 
+    /// Lit pixels of `s` as `(min_x, max_x, min_y, max_y)` around the
+    /// anchor pixel.
+    fn extent(s: Settings) -> (i32, i32, i32, i32) {
+        let c = crate::layer::render(&s.to_layers());
+        let mut e = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for y in 0..c.height as i32 {
+            for x in 0..c.width as i32 {
+                if c.pixels[(y as u32 * c.width + x as u32) as usize] >> 24 > 0 {
+                    let (x, y) = (x - c.anchor.0, y - c.anchor.1);
+                    e = (e.0.min(x), e.1.max(x), e.2.min(y), e.3.max(y));
+                }
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn even_sizes_sit_exactly_on_the_screen_centre() {
+        // The screen centre is the anchor pixel's top-left corner (the
+        // overlay puts the anchor at width / 2). Pixel k covers k..k + 1
+        // from it, so a shape is centred when min + max + 1 == 0. Odd
+        // sizes have a middle pixel and can only be half a pixel off.
+        let off = Settings {
+            outlines: false,
+            inner_lines: Lines {
+                show: false,
+                ..Lines::INNER
+            },
+            outer_lines: Lines {
+                show: false,
+                ..Lines::OUTER
+            },
+            ..Settings::default()
+        };
+        for size in 1..=12u32 {
+            let want = if size % 2 == 0 { -1 } else { 0 };
+            let dot = extent(Settings {
+                center_dot: true,
+                center_dot_thickness: size,
+                ..off
+            });
+            assert_eq!(
+                (dot.0 + dot.1, dot.2 + dot.3),
+                (want, want),
+                "{size} px dot"
+            );
+            for (len, gap) in [(1, 0), (6, 0), (6, 3), (5, 4)] {
+                let cross = extent(Settings {
+                    inner_lines: Lines {
+                        show: true,
+                        thickness: size,
+                        length: len,
+                        offset: gap,
+                        ..Lines::INNER
+                    },
+                    ..off
+                });
+                assert_eq!(
+                    (cross.0 + cross.1, cross.2 + cross.3),
+                    (want, want),
+                    "{size} px lines, length {len}, gap {gap}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn imports_a_typical_code() {
         let ch = import(

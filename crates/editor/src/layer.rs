@@ -18,6 +18,13 @@
 //! size centred on 0, for example) gives the pixel to the top and left, as
 //! Valorant does, so a 2 px line centred on 0 covers pixels -1 and 0.
 //!
+//! That is what centres even sizes on the screen: the overlay puts the anchor
+//! pixel at `width / 2`, so on an even-sized screen the true centre is the
+//! anchor pixel's top-left corner, and pixels -1 and 0 sit evenly around it.
+//! Odd sizes have a middle pixel, which lands on the anchor pixel, half a
+//! pixel below and right of the true centre; no whole-pixel shape can do
+//! better there.
+//!
 //! # Outlines
 //!
 //! A layer's outline is the shape grown by `outline` pixels, minus the shape.
